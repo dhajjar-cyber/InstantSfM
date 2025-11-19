@@ -33,6 +33,7 @@
 </div>
 
 
+**⚠️Please note that this repository is still under active development. We will keep updating it regularly. Feel free to open an issue if you encounter any problem.**
 
 ## 1. Installation  
 **Note: The project requires an NVIDIA GPU with CUDA support. The code is tested on Ubuntu 20.04 with CUDA 12.1 and PyTorch 2.3.1.** 
@@ -151,10 +152,3 @@ and
   url = {https://arxiv.org/abs/2409.12190}
 }
 ```
-
-
-
-
-
-
-
