@@ -5,7 +5,15 @@ import tqdm
 import concurrent.futures
 
 from instantsfm.utils import database
-from instantsfm.scene.defs import Ids2PairId, PairId2Ids
+
+# Local pair ID encoding for matcher indices (not related to ViewGraph pair keys)
+C_MAX_INT = 2**31 - 1
+
+def PairId2Ids(pair_id):
+    return (pair_id % C_MAX_INT, pair_id // C_MAX_INT)
+
+def Ids2PairId(id1, id2):
+    return (id1 * C_MAX_INT + id2 if id1 < id2 else id2 * C_MAX_INT + id1)
 
 def GenerateDatabase(image_path, database_path, feature_handler_name, config, single_camera=False, camera_per_folder=False):
     # colmap support from command line. ensure colmap is installed

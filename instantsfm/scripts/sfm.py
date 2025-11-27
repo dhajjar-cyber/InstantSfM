@@ -36,10 +36,10 @@ def run_sfm():
     config = Config(feature_name, mapper_args.manual_config_name)
     if mapper_args.enable_gui or mapper_args.record_recon:
         visualizer = ReconstructionVisualizer(save_data=mapper_args.record_recon, 
-                                              save_dir=mapper_args.record_path if mapper_args.record_path else path_info.record_path)
-        cameras, images, tracks = SolveGlobalMapper(view_graph, cameras, images, config, depths=depths, visualizer=visualizer)
+                                                save_dir=mapper_args.record_path if mapper_args.record_path else path_info.record_path)
     else:
-        cameras, images, tracks = SolveGlobalMapper(view_graph, cameras, images, config, depths=depths)
+        visualizer = None
+    cameras, images, tracks = SolveGlobalMapper(view_graph, cameras, images, config, depths=depths, visualizer=visualizer)
     print('Reconstruction done in', time.time() - start_time, 'seconds')
     WriteGlomapReconstruction(path_info.output_path, cameras, images, tracks, path_info.image_path, export_txt=mapper_args.export_txt)
     print('Reconstruction written to', path_info.output_path)

@@ -1,4 +1,5 @@
 import time
+import numpy as np
 
 from instantsfm.scene.defs import ViewGraph
 from instantsfm.controllers.config import Config
@@ -73,7 +74,7 @@ def SolveGlobalMapper(view_graph:ViewGraph, cameras, images, config:Config, dept
         if not view_graph.keep_largest_connected_component(images):
             print('Failed to keep the largest connected component.')
             exit()
-        num_img = sum([1 for img in images if img.is_registered])
+        num_img = np.sum(images.is_registered)
         print(num_img, '/', len(images), 'images are within the connected component.')
         print('Rotation averaging took: ', time.time() - start_time)
 
@@ -99,8 +100,6 @@ def SolveGlobalMapper(view_graph:ViewGraph, cameras, images, config:Config, dept
 
         gp_engine = TorchGP(visualizer=visualizer)
         gp_engine.InitializeRandomPositions(cameras, images, tracks, depths)
-        '''if depths is not None:
-            gp_engine.Optimize(cameras, images, tracks, depths,  config.GLOBAL_POSITIONER_OPTIONS, depth_only=True)'''
         gp_engine.Optimize(cameras, images, tracks, depths, config.GLOBAL_POSITIONER_OPTIONS)
         tracks = FilterTracksByAngle(cameras, images, tracks, config.INLIER_THRESHOLD_OPTIONS['max_angle_error'])
         NormalizeReconstruction(images, tracks, depths)
@@ -116,7 +115,7 @@ def SolveGlobalMapper(view_graph:ViewGraph, cameras, images, config:Config, dept
             ba_engine.Solve(cameras, images, tracks, config.BUNDLE_ADJUSTER_OPTIONS)
             UndistortImages(cameras, images)
             FilterTracksByReprojectionNormalized(cameras, images, tracks, config.INLIER_THRESHOLD_OPTIONS['max_reprojection_error'] * max(1, 3 - iter))
-        print(f'{len([image for image in images if image.is_registered])} images are registered after BA.')
+        print(f'{np.sum(images.is_registered)} images are registered after BA.')
             
         print('Filtering tracks')
         UndistortImages(cameras, images)

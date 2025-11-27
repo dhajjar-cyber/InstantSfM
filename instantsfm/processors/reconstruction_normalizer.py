@@ -1,7 +1,10 @@
 import numpy as np
 
 def NormalizeReconstruction(images, tracks, depths=None, fixed_scale=False, extent=10., p0=0.1, p1=0.9):
-    coords = np.array([image.center() for image in images])
+    # Batch compute image centers
+    Rs = images.world2cams[:, :3, :3]  # (N, 3, 3)
+    ts = images.world2cams[:, :3, 3]   # (N, 3)
+    coords = -np.einsum('nij,nj->ni', Rs.transpose(0, 2, 1), ts)  # (N, 3)
     coords_sorted = np.sort(coords, axis=0)
     P0 = int(p0 * (coords.shape[0] - 1)) if coords.shape[0] > 3 else 0
     P1 = int(p1 * (coords.shape[0] - 1)) if coords.shape[0] > 3 else coords.shape[0] - 1
@@ -13,13 +16,12 @@ def NormalizeReconstruction(images, tracks, depths=None, fixed_scale=False, exte
         # depth-based normalization
         depth_gt_list = []
         depth_pred_list = []
-        for track in tracks.values():
-            for image_id, feature_id in track.observations:
-                image = images[image_id]
-                depth_gt = image.depths[feature_id]
+        for track_id in range(len(tracks)):
+            for image_id, feature_id in tracks.observations[track_id]:
+                depth_gt = images.depths[image_id][feature_id]
                 if depth_gt > 0:
-                    C = image.center()
-                    P = track.xyz
+                    C = coords[image_id]  # Already computed
+                    P = tracks.xyzs[track_id]
                     depth_pred = np.linalg.norm(P - C)
                     depth_gt_list.append(depth_gt)
                     depth_pred_list.append(depth_pred)
@@ -38,7 +40,7 @@ def NormalizeReconstruction(images, tracks, depths=None, fixed_scale=False, exte
         
     
     coords = (coords - mean_coord) * scale
-    for idx, image in enumerate(images):
-        image.world2cam[:3, 3] = -image.world2cam[:3, :3] @ coords[idx]
-    for track in tracks.values():
-        track.xyz = (track.xyz - mean_coord) * scale
+    # Batch update translations
+    images.world2cams[:, :3, 3] = -np.einsum('nij,nj->ni', images.world2cams[:, :3, :3], coords)
+    # Batch update track positions
+    tracks.xyzs[:] = (tracks.xyzs - mean_coord) * scale

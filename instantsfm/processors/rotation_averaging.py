@@ -5,7 +5,7 @@ from sksparse.cholmod import cholesky
 from queue import Queue
 import tqdm
 
-from instantsfm.scene.defs import Ids2PairId, ViewGraph
+from instantsfm.scene.defs import ViewGraph
 from instantsfm.utils.tree import MaximumSpanningTree
 from instantsfm.utils.l1_solver import L1Solver
     
@@ -28,27 +28,34 @@ class RotationEstimator:
                 q.put(child)
             if current == root or parents[current] == -1:
                 continue
-            image_pair = view_graph.image_pairs[Ids2PairId(current, parents[current])]
+            # Try both key orders since we don't know which was stored
+            parent_id = parents[current]
+            pair_key = (current, parent_id) if (current, parent_id) in view_graph.image_pairs else (parent_id, current)
+            image_pair = view_graph.image_pairs[pair_key]
             if image_pair.image_id1 == current:
                 pair_rotation = R.from_quat(image_pair.rotation).as_matrix()
-                rotation = np.linalg.inv(pair_rotation) @ images[parents[current]].world2cam[:3, :3]
-                images[current].world2cam[:3, :3] = rotation
+                rotation = np.linalg.inv(pair_rotation) @ images.world2cams[parents[current], :3, :3]
+                images.world2cams[current, :3, :3] = rotation
             else:
                 pair_rotation = R.from_quat(image_pair.rotation).as_matrix()
-                rotation = pair_rotation @ images[parents[current]].world2cam[:3, :3]
-                images[current].world2cam[:3, :3] = rotation
+                rotation = pair_rotation @ images.world2cams[parents[current], :3, :3]
+                images.world2cams[current, :3, :3] = rotation
 
     def SetupLinearSystem(self, view_graph:ViewGraph, images):
-        self.images = {image_id: image for image_id, image in enumerate(images) if image.is_registered}
-        self.image_pairs = {pair_id: pair for pair_id, pair in view_graph.image_pairs.items() if pair.is_valid}
+        registered_mask = images.is_registered
+        self.images = {image_id: image for image_id, image in enumerate(images) if registered_mask[image_id]}
+        self.image_pairs = {pair_key: pair for pair_key, pair in view_graph.image_pairs.items() if pair.is_valid}
         self.image_id2idx = {}
         self.rotation_estimated = np.zeros(len(images) * 3)
         num_dof = 0
-        for image_id, image in enumerate(images):
-            if not image.is_registered:
+        # Batch compute axis angles for registered images
+        Rs = images.world2cams[:, :3, :3]  # (N, 3, 3)
+        axis_angles = R.from_matrix(Rs.reshape(-1, 3, 3)).as_rotvec().reshape(len(images), 3)  # (N, 3)
+        for image_id in range(len(images)):
+            if not registered_mask[image_id]:
                 continue
             self.image_id2idx[image_id] = num_dof
-            self.rotation_estimated[num_dof:num_dof+3] = image.axis_angle()
+            self.rotation_estimated[num_dof:num_dof+3] = axis_angles[image_id]
             num_dof += 3
             
         if self.fixed_camera_id == -1:
@@ -56,16 +63,16 @@ class RotationEstimator:
             self.fixed_camera_rotation = self.images[self.fixed_camera_id].axis_angle()
         
         self.rel_temp_info = {}
-        for pair in self.image_pairs.values():
+        for pair_key, pair in self.image_pairs.items():
             image_id1, image_id2 = pair.image_id1, pair.image_id2
-            self.rel_temp_info[Ids2PairId(image_id1, image_id2)] = {'R_rel': R.from_quat(pair.rotation).as_matrix()}
+            self.rel_temp_info[pair_key] = {'R_rel': R.from_quat(pair.rotation).as_matrix()}
         
         self.sparse_matrix = lil_matrix((len(self.rel_temp_info) * 3 + 3, num_dof))
         curr_pos = 0
-        for pair in self.image_pairs.values():
+        for pair_key, pair in self.image_pairs.items():
             image_id1, image_id2 = pair.image_id1, pair.image_id2
             vector_idx1, vector_idx2 = self.image_id2idx[image_id1], self.image_id2idx[image_id2]
-            self.rel_temp_info[Ids2PairId(image_id1, image_id2)]['index'] = curr_pos
+            self.rel_temp_info[pair_key]['index'] = curr_pos
             for i in range(3):
                 self.sparse_matrix[curr_pos + i, vector_idx1 + i] = -1
             for i in range(3):
@@ -82,8 +89,8 @@ class RotationEstimator:
         self.tangent_space_residual = np.zeros(curr_pos)
 
     def ComputeResiduals(self):
-        for pair_id, pair_info in self.rel_temp_info.items():
-            pair = self.image_pairs[pair_id]
+        for pair_key, pair_info in self.rel_temp_info.items():
+            pair = self.image_pairs[pair_key]
             image_id1, image_id2 = pair.image_id1, pair.image_id2
             idx1, idx2 = self.image_id2idx[image_id1], self.image_id2idx[image_id2]
 
@@ -186,10 +193,11 @@ class RotationEstimator:
             if not self.SolveIRLS(ROTATION_ESTIMATOR_OPTIONS):
                 return False
             
-        for image_id, image in enumerate(images):
-            if not image.is_registered:
+        # Batch write rotation results
+        for image_id in range(len(images)):
+            if not images.is_registered[image_id]:
                 continue
             idx = self.image_id2idx[image_id]
-            image.world2cam[:3, :3] = R.from_rotvec(self.rotation_estimated[idx:idx+3]).as_matrix()
+            images.world2cams[image_id, :3, :3] = R.from_rotvec(self.rotation_estimated[idx:idx+3]).as_matrix()
         view_graph.image_pairs.update(self.image_pairs)
         return True

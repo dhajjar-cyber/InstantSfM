@@ -179,46 +179,40 @@ class ReconstructionVisualizer:
         colors_list = []
         
         # Extract points and colors from tracks
-        if isinstance(tracks, dict):
-            # If tracks is a dictionary (key-value pairs)
-            for track in tracks.values():
-                if hasattr(track, 'xyz') and track.xyz is not None:
-                    points_list.append(track.xyz)
-                    if hasattr(track, 'color') and np.any(track.color):
-                        colors_list.append(track.color)
-                    else:
-                        colors_list.append(np.array([255, 0, 0], dtype=np.uint8))
-        else:
-            # If tracks is a list
-            for track in tracks:
-                if hasattr(track, 'xyz') and track.xyz is not None:
-                    points_list.append(track.xyz)
-                    if hasattr(track, 'color') and np.any(track.color):
-                        colors_list.append(track.color)
-                    else:
-                        colors_list.append(np.array([255, 0, 0], dtype=np.uint8))
+        # Tracks container has direct array access
+        for track_id in range(len(tracks)):
+            xyz = tracks.xyzs[track_id]
+            if xyz is not None:
+                points_list.append(xyz)
+                color = tracks.colors[track_id]
+                if np.any(color):
+                    colors_list.append(color)
+                else:
+                    colors_list.append(np.array([255, 0, 0], dtype=np.uint8))
         
         # Process camera data
         cameras_dict = {}
         
-        for i, img in enumerate(images):
+        for i in range(len(images)):
             # Skip unregistered cameras
-            if not hasattr(img, 'is_registered') or not img.is_registered:
+            if not images.is_registered[i]:
                 continue
                 
             # Get camera parameters
-            if not hasattr(img, 'world2cam') or img.world2cam is None:
+            world2cam = images.world2cams[i]
+            if world2cam is None:
                 continue
                 
-            R = img.world2cam[:3, :3]
+            R = world2cam[:3, :3]
             R = R.T
-            t = img.center()
+            t = -R @ world2cam[:3, 3]
             
             # Ensure camera ID exists
-            if not hasattr(img, 'cam_id') or img.cam_id is None or img.cam_id >= len(cameras):
+            cam_id = images.cam_ids[i]
+            if cam_id >= len(cameras):
                 continue
                 
-            cam = cameras[img.cam_id]
+            cam = cameras[cam_id]
             
             # Calculate FOV
             fov = 2 * np.arctan2(cam.height / 2, cam.focal_length[1]) if hasattr(cam, 'focal_length') else 0.8
@@ -236,9 +230,9 @@ class ReconstructionVisualizer:
                 'aspect': aspect,
             }
             
-            # Add image data if available
-            if hasattr(img, 'image_data') and img.image_data is not None:
-                cameras_dict[i]['image'] = img.image_data
+            # Add image data if available (Images container may have image_data list)
+            if hasattr(images, 'image_data') and images.image_data is not None and i < len(images.image_data):
+                cameras_dict[i]['image'] = images.image_data[i]
         
         # Convert to numpy arrays
         if points_list and colors_list:
@@ -270,13 +264,15 @@ class ReconstructionVisualizer:
         """Serialize track objects for saving."""
         serialized = []
         
-        for track_id, track in tracks.items():
+        for track_id in range(len(tracks)):
             track_data = {}
             track_data['id'] = track_id
-            if hasattr(track, 'xyz') and track.xyz is not None:
-                track_data['xyz'] = track.xyz.tolist()
-            if hasattr(track, 'color') and track.color is not None:
-                track_data['color'] = track.color.tolist()
+            xyz = tracks.xyzs[track_id]
+            if xyz is not None:
+                track_data['xyz'] = xyz.tolist()
+            color = tracks.colors[track_id]
+            if color is not None:
+                track_data['color'] = color.tolist()
             serialized.append(track_data)
         
         return serialized

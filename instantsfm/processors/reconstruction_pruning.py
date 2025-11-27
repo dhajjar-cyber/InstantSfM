@@ -1,6 +1,6 @@
 import numpy as np
 
-from instantsfm.scene.defs import ImagePair, Ids2PairId, PairId2Ids, ViewGraph
+from instantsfm.scene.defs import ImagePair, ViewGraph
 from instantsfm.utils.union_find import UnionFind
 
 '''
@@ -110,7 +110,7 @@ def EstablishStrongClusters(view_graph:ViewGraph, images, threshold, min_num_ima
     view_graph.keep_largest_connected_component(images)
 
     uf = UnionFind()
-    for pair_id, image_pair in view_graph.image_pairs.items():
+    for (image_id1, image_id2), image_pair in view_graph.image_pairs.items():
         if not image_pair.is_valid:
             continue
         if image_pair.weight > threshold:
@@ -128,7 +128,7 @@ def EstablishStrongClusters(view_graph:ViewGraph, images, threshold, min_num_ima
             break
 
         num_pairs = {}
-        for pair_id, image_pair in view_graph.image_pairs.items():
+        for pair_key, image_pair in view_graph.image_pairs.items():
             if not image_pair.is_valid:
                 continue
             if image_pair.weight < 0.75 * threshold:
@@ -158,7 +158,7 @@ def EstablishStrongClusters(view_graph:ViewGraph, images, threshold, min_num_ima
                     status = True
                     uf.Union(root1, root2)
 
-    for pair_id, image_pair in view_graph.image_pairs.items():
+    for pair_key, image_pair in view_graph.image_pairs.items():
         if not image_pair.is_valid:
             continue
         image_id1 = image_pair.image_id1
@@ -172,23 +172,24 @@ def EstablishStrongClusters(view_graph:ViewGraph, images, threshold, min_num_ima
 def PruneWeaklyConnectedImages(images, tracks, min_num_images=2):
     image_observation_count = {}
 
-    for track in tracks.values():
-        obs_count = track.observations.shape[0]
+    for track_id in range(len(tracks)):
+        obs_count = tracks.observations[track_id].shape[0]
         if obs_count <= 2:
             continue
         for i in range(obs_count):
             for j in range(i+1, obs_count):
-                image_id1 = track.observations[i][0]
-                image_id2 = track.observations[j][0]
+                image_id1 = tracks.observations[track_id][i][0]
+                image_id2 = tracks.observations[track_id][j][0]
                 if image_id1 == image_id2:
                     continue
-                pair_id = Ids2PairId(image_id1, image_id2)
-                if pair_id not in image_observation_count:
-                    image_observation_count[pair_id] = 1
+                # Ensure consistent ordering: smaller ID first
+                pair_key = (min(image_id1, image_id2), max(image_id1, image_id2))
+                if pair_key not in image_observation_count:
+                    image_observation_count[pair_key] = 1
                 else:
-                    image_observation_count[pair_id] += 1
+                    image_observation_count[pair_key] += 1
 
-    image_observation_count = {pair_id: count for pair_id, count in image_observation_count.items() if count >= 5}
+    image_observation_count = {pair_key: count for pair_key, count in image_observation_count.items() if count >= 5}
     print(f"Established visibility graph with {len(image_observation_count)} pairs")
 
     # sort the pair count
@@ -203,8 +204,8 @@ def PruneWeaklyConnectedImages(images, tracks, min_num_images=2):
     print(f"Threshold for Strong Clustering: {median_count - median_count_diff}")
 
     view_graph = ViewGraph()
-    for pair_id, count in image_observation_count.items():
-        image_id1, image_id2 = PairId2Ids(pair_id)
-        view_graph.image_pairs[pair_id] = ImagePair(image_id1=image_id1, image_id2=image_id2, weight=count)
+    for pair_key, count in image_observation_count.items():
+        image_id1, image_id2 = pair_key
+        view_graph.image_pairs[pair_key] = ImagePair(image_id1=image_id1, image_id2=image_id2, weight=count)
     threshold = max(median_count - median_count_diff, 20)
     EstablishStrongClusters(view_graph, images, threshold, min_num_images)

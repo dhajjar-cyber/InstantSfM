@@ -1,14 +1,13 @@
 
-from instantsfm.scene.defs import ConfigurationType, PairId2Ids, ViewGraph
+from instantsfm.scene.defs import ConfigurationType, ViewGraph
 from instantsfm.utils.two_view_geometry import F_from_motion_and_camera
 
 
 def UpdateImagePairsConfig(view_graph:ViewGraph, cameras, images):
     camera_counter_total, camera_counter_calib = [0 for _ in cameras], [0 for _ in cameras]
-    for pair_id, image_pair in view_graph.image_pairs.items():
+    for (image_id1, image_id2), image_pair in view_graph.image_pairs.items():
         if not image_pair.is_valid:
             continue
-        image_id1, image_id2 = PairId2Ids(pair_id)
         cam_id1 = images[image_id1].cam_id
         cam_id2 = images[image_id2].cam_id
         camera1 = cameras[cam_id1]
@@ -33,32 +32,31 @@ def UpdateImagePairsConfig(view_graph:ViewGraph, cameras, images):
         elif second/first < 0.5:
             camera_validity[cam_id] = False
     
-    for pair_id, image_pair in view_graph.image_pairs.items():
+    for (image_id1, image_id2), image_pair in view_graph.image_pairs.items():
         if not image_pair.is_valid or not image_pair.config == ConfigurationType.UNCALIBRATED:
             continue
-        image_id1, image_id2 = PairId2Ids(pair_id)
         cam_id1 = images[image_id1].cam_id
         cam_id2 = images[image_id2].cam_id
         if camera_validity[cam_id1] and camera_validity[cam_id2]:
             image_pair.config = ConfigurationType.CALIBRATED
 
 def DecomposeRelPose(view_graph:ViewGraph, cameras, images):
-    image_pair_ids = []
-    for pair_id, image_pair in view_graph.image_pairs.items():
+    image_pair_keys = []
+    for pair_key, image_pair in view_graph.image_pairs.items():
         if not image_pair.is_valid:
             continue
-        image_id1, image_id2 = PairId2Ids(pair_id)
+        image_id1, image_id2 = pair_key
         cam_id1 = images[image_id1].cam_id
         cam_id2 = images[image_id2].cam_id
         if not cameras[cam_id1].has_prior_focal_length or not cameras[cam_id2].has_prior_focal_length:
             continue
-        image_pair_ids.append(pair_id)
+        image_pair_keys.append(pair_key)
     
-    print('Decomposing relative poses for', len(image_pair_ids), 'pairs')
+    print('Decomposing relative poses for', len(image_pair_keys), 'pairs')
 
-    for pair_id in image_pair_ids:
-        image_pair = view_graph.image_pairs[pair_id]
-        image_id1, image_id2 = PairId2Ids(pair_id)
+    for pair_key in image_pair_keys:
+        image_pair = view_graph.image_pairs[pair_key]
+        image_id1, image_id2 = pair_key
         cam_id1 = images[image_id1].cam_id
         cam_id2 = images[image_id2].cam_id
         camera1 = cameras[cam_id1]
@@ -67,8 +65,8 @@ def DecomposeRelPose(view_graph:ViewGraph, cameras, images):
             image_pair.config = ConfigurationType.CALIBRATED
 
     counter = 0
-    for pair_id in image_pair_ids:
-        image_pair = view_graph.image_pairs[pair_id]
+    for pair_key in image_pair_keys:
+        image_pair = view_graph.image_pairs[pair_key]
         if not image_pair.config in [ConfigurationType.CALIBRATED, ConfigurationType.PLANAR_OR_PANORAMIC]:
             counter += 1
     print(f'Decompose relative pose done. {counter} pairs are pure rotation.')

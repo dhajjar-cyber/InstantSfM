@@ -1,74 +1,82 @@
 import numpy as np
 import os
 
-from instantsfm.scene.reconstruction import Reconstruction, point3d
+from instantsfm.scene.reconstruction import Reconstruction
 
 def ExportReconstruction(output_path, cameras, images, tracks, image_path, cluster_id=-1, include_image_points=False, export_txt=False):
-    # Add cameras
-    reconstruction = Reconstruction(cameras=cameras)
-
-    images_selected = {}
-    for image in images:
-        if cluster_id != -1 and image.cluster_id != cluster_id:
-            continue
-        if not image.is_registered:
-            continue
-        images_selected[image.id] = image
-    images = images_selected
-
-    # Prepare the 2d-3d correspondences
-    image2point3d = {}
-    if len(tracks) > 0 or include_image_points:
-        for image_id, image in images.items():
-            image2point3d[image_id] = -np.ones(len(image.features), dtype=int)
-
-        if len(tracks) > 0:
-            for track_id, track in tracks.items():
-                if len(track.observations) < 3:
-                    continue
-                for obs in track.observations:
-                    if obs[0] in image2point3d:
-                        image2point3d[obs[0]][obs[1]] = track_id
+    """Export reconstruction using Images/Tracks containers directly.
     
-    # Add points
-    for track_id, track in tracks.items():
-        point = point3d(xyz=track.xyz, color=track.color, error=0, track_elements=track.observations)
-        if len(point.track_elements) >= 2:
-            reconstruction.point3d[track_id] = point
-    print(f'Exporting {len(reconstruction.point3d)} points')
+    Args:
+        output_path: Output directory path
+        cameras: List of camera models
+        images: Images container
+        tracks: Tracks container
+        image_path: Path to image directory for color extraction
+        cluster_id: Cluster ID to filter (-1 for all)
+        include_image_points: Whether to include image points
+        export_txt: Export as text format instead of binary
+    """
+    # Create reconstruction with containers
+    reconstruction = Reconstruction(cameras=cameras, images=images, tracks=tracks)
     
-    # Add images
-    for image_id, image in images.items():
-        image.point3d_ids = -np.ones(len(image.features), dtype=int)
-        if image_id in image2point3d:
-            track_ids = image2point3d[image_id]
-            for idx, feat in enumerate(image.features):
-                if track_ids[idx] != -1:
-                    if image.point3d_ids[idx] == -1:
-                        image.num_points3d += 1
-                    image.point3d_ids[idx] = track_ids[idx]
-    reconstruction.images = images
-
+    # Filter by cluster if needed
+    if cluster_id != -1:
+        reconstruction.filter_by_cluster(cluster_id)
+    
+    # Filter by registration status
+    reconstruction.filter_registered_only()
+    
+    # Build 2D-3D correspondences
+    reconstruction.build_correspondences(min_track_length=3 if not include_image_points else 0)
+    
+    # Extract colors from images if path provided
     if image_path != "":
-        reconstruction.ExtractColorsForAllImages(image_path)
+        reconstruction.extract_colors_batch(image_path)
     
+    # Create output directory
     cluster_path = os.path.join(output_path, '0' if cluster_id == -1 else str(cluster_id))
     os.makedirs(cluster_path, exist_ok=True)
 
+    # Write reconstruction
     if export_txt:
-        reconstruction.WriteText(cluster_path)
+        reconstruction.write_text(cluster_path)
     else:
-        reconstruction.WriteBinary(cluster_path)
+        reconstruction.write_binary(cluster_path)
+    
+    print(f'Exported {reconstruction.num_points} points and {reconstruction.num_images} images')
 
 def WriteGlomapReconstruction(output_path, cameras, images, tracks, image_path, export_txt=False):
-    largest_component_num = -1
-    for image in images:
-        if hasattr(image, 'cluster_id') and image.cluster_id > largest_component_num:
-            largest_component_num = image.cluster_id
+    """Write reconstruction, handling multiple clusters if present.
     
-    if largest_component_num == -1:
+    Args:
+        output_path: Output directory path
+        cameras: List of camera models
+        images: Images container
+        tracks: Tracks container
+        image_path: Path to image directory
+        export_txt: Export as text format instead of binary
+    """
+    # Check for clusters
+    if not hasattr(images, 'cluster_ids'):
+        # No clustering, export all
+        ExportReconstruction(output_path, cameras, images, tracks, image_path, export_txt=export_txt)
+        return
+    
+    # Find max cluster ID
+    registered_mask = images.is_registered
+    if not np.any(registered_mask):
+        print("No registered images to export")
+        return
+    
+    cluster_ids = images.cluster_ids[registered_mask]
+    unique_clusters = np.unique(cluster_ids)
+    
+    if len(unique_clusters) == 1:
+        # Single cluster, export all
         ExportReconstruction(output_path, cameras, images, tracks, image_path, export_txt=export_txt)
     else:
-        for i in range(largest_component_num):
-            print(f'Exporting reconstruction {i+1} / {largest_component_num+1}')
-            ExportReconstruction(output_path + f'_{i}', cameras, images, tracks, image_path, i, export_txt=export_txt)
+        # Multiple clusters, export separately
+        for cluster_id in unique_clusters:
+            print(f'Exporting reconstruction for cluster {cluster_id} ({np.sum(cluster_ids == cluster_id)} images)')
+            ExportReconstruction(output_path, cameras, images, tracks, 
+                                 image_path, cluster_id, export_txt=export_txt)

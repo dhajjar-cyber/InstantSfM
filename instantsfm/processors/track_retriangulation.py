@@ -1,13 +1,11 @@
 import numpy as np
 from scipy.spatial.transform import Rotation as R
-import tqdm
-import cv2
 
 from instantsfm.processors.image_undistortion import UndistortImages
 from instantsfm.processors.track_filter import FilterTracksByReprojection, FilterTracksTriangulationAngle
 from instantsfm.processors.bundle_adjustment import TorchBA
 from instantsfm.utils.union_find import UnionFind
-from instantsfm.scene.defs import CameraModelId, Track, get_camera_model_info
+from instantsfm.scene.defs import CameraModelId, get_camera_model_info
 from instantsfm.utils.cost_function import reproject_funcs
 
 import torch
@@ -62,12 +60,19 @@ def complete_tracks(cameras, images, tracks, tracks_orig, TRIANGULATOR_OPTIONS):
     camera_indices_tensor = obs_info_tensor[:, 0] # [n]
 
     camera_model = cameras[0].model_id # Assume all cameras have the same model
-    camera_params_list = [torch.cat((torch.tensor(img.world2cam[:3, 3]),
-                                     torch.tensor(R.from_matrix(img.world2cam[:3, :3]).as_quat()), 
-                                     torch.tensor(cameras[img.cam_id].params))) for img in images]
+    # Batch build camera params from Images container
+    camera_params_list = []
+    for img_id in range(len(images)):
+        world2cam = images.world2cams[img_id]
+        cam_id = images.cam_ids[img_id]
+        camera_params_list.append(torch.cat((
+            torch.tensor(world2cam[:3, 3]),
+            torch.tensor(R.from_matrix(world2cam[:3, :3]).as_quat()),
+            torch.tensor(cameras[cam_id].params)
+        )))
     camera_params = torch.stack(camera_params_list, dim=0).to(device).to(torch.float64)
-    points_3d_list = [torch.tensor(track.xyz) for track in tracks.values()]
-    points_3d = torch.stack(points_3d_list, dim=0).to(device).to(torch.float64)
+    # Batch extract track positions
+    points_3d = torch.tensor(tracks.xyzs, device=device, dtype=torch.float64)
 
     # Indexing
     points_3d = points_3d[point_indices_tensor]
@@ -102,8 +107,8 @@ def complete_tracks(cameras, images, tracks, tracks_orig, TRIANGULATOR_OPTIONS):
         track_idx = point_indices_tensor[split_indices[i]].item()
         track_id = track_idx2id[track_idx]
         track = tracks[track_id]
-        num_completed += abs((split_indices[i+1] - split_indices[i]) - track.observations.shape[0])
-        track.observations = obs_info[split_indices[i]:split_indices[i+1]]
+        num_completed += abs((split_indices[i+1] - split_indices[i]) - tracks.observations[i].shape[0])
+        tracks.observations[i] = obs_info[split_indices[i]:split_indices[i+1]]
 
     return num_completed
 
@@ -129,8 +134,9 @@ def merge_tracks(cameras, images, tracks, TRIANGULATOR_OPTIONS):
     """
     max_squared_reproj_error = TRIANGULATOR_OPTIONS['merge_max_reproj_error'] ** 2
 
-    xyz_points = np.array([track.xyz for track in tracks.values()])
-    track_idx2id = {idx: track_id for idx, track_id in enumerate(tracks.keys())}
+    # Batch extract xyz positions
+    xyz_points = tracks.xyzs
+    track_idx2id = {idx: idx for idx in range(len(tracks))}
 
     k = min(3, len(tracks))
     index = faiss.IndexFlatL2(3)
@@ -149,7 +155,7 @@ def merge_tracks(cameras, images, tracks, TRIANGULATOR_OPTIONS):
     source_id, target_id = [track_idx2id[idx] for idx in source_idx], [track_idx2id[idx] for idx in target_idx]
 
     uf = UnionFind()
-    for track_id in tracks.keys():
+    for track_id in range(len(tracks)):
         uf.Find(track_id)
 
     def try_merge_pair(track_id1, track_id2):
@@ -158,22 +164,24 @@ def merge_tracks(cameras, images, tracks, TRIANGULATOR_OPTIONS):
         if track_actual_id1 == track_actual_id2:
             return False, None
         
-        track1 = tracks[track_actual_id1]
-        track2 = tracks[track_actual_id2]
+        track1_xyz = tracks.xyzs[track_actual_id1]
+        track2_xyz = tracks.xyzs[track_actual_id2]
+        track1_obs = tracks.observations[track_actual_id1]
+        track2_obs = tracks.observations[track_actual_id2]
 
-        weight1 = track1.observations.shape[0]
-        weight2 = track2.observations.shape[0]
-        merged_xyz = (weight1 * track1.xyz + weight2 * track2.xyz) / (weight1 + weight2)
+        weight1 = track1_obs.shape[0]
+        weight2 = track2_obs.shape[0]
+        merged_xyz = (weight1 * track1_xyz + weight2 * track2_xyz) / (weight1 + weight2)
 
-        all_obs = np.concatenate([track1.observations, track2.observations], axis=0)
+        all_obs = np.concatenate([track1_obs, track2_obs], axis=0)
 
         for image_id, feature_id in all_obs:
-            image = images[image_id]
-            pt_calc = image.world2cam[:3, :3] @ merged_xyz + image.world2cam[:3, 3]
+            world2cam = images.world2cams[image_id]
+            pt_calc = world2cam[:3, :3] @ merged_xyz + world2cam[:3, 3]
             if pt_calc[2] < EPSILON:
                 return False, None
-            feature = image.features[feature_id]
-            cam = cameras[image.cam_id]
+            feature = images.features[image_id][feature_id]
+            cam = cameras[images.cam_ids[image_id]]
             pt_reproj = cam.cam2img(pt_calc)
             sq_reprojection_error = np.sum((pt_reproj - feature) ** 2)
             if sq_reprojection_error > max_squared_reproj_error:
@@ -186,14 +194,18 @@ def merge_tracks(cameras, images, tracks, TRIANGULATOR_OPTIONS):
         merged, result = try_merge_pair(src, tgt)
         if merged:
             uf.Union(src, tgt)
-            total_merged += len(tracks[src].observations)
+            total_merged += len(tracks.observations[src])
             # save new track into target track (align behavior with union find)
-            tracks[uf.Find(tgt)].xyz = result[0]
-            tracks[uf.Find(tgt)].observations = result[1]
+            final_tgt = uf.Find(tgt)
+            tracks.xyzs[final_tgt] = result[0]
+            tracks.observations[final_tgt] = result[1]
 
-    for track_id in list(tracks.keys()):
-        if uf.Find(track_id) != track_id:
-            del tracks[track_id]
+    # Mark deleted tracks and filter in-place
+    valid_mask = np.array([uf.Find(track_id) == track_id for track_id in range(len(tracks))], dtype=bool)
+    valid_indices = np.where(valid_mask)[0]
+    
+    # Filter tracks in-place to maintain reference semantics
+    tracks.filter_by_mask(valid_mask)
 
     return total_merged
 
@@ -214,13 +226,13 @@ def complete_and_merge_tracks(cameras, images, tracks, tracks_orig, TRIANGULATOR
 
 def RetriangulateTracks(cameras, images, tracks, tracks_orig, TRIANGULATOR_OPTIONS, BUNDLE_ADJUSTER_OPTIONS):
     # record status of images
-    image_registered = [image.is_registered for image in images]
+    image_registered = images.is_registered.copy()
 
     # add new tracks
     '''P = []
-    for image in images:
-        cam = cameras[image.cam_id]
-        Rt = image.world2cam
+    for image_id in range(len(images)):
+        cam = cameras[images.cam_ids[image_id]]
+        Rt = images.world2cams[image_id]
         K = cam.get_K()
         P.append(K @ Rt[:3])
 
@@ -231,13 +243,13 @@ def RetriangulateTracks(cameras, images, tracks, tracks_orig, TRIANGULATOR_OPTIO
             if not image_registered[image_idx1] or not image_registered[image_idx2]:
                 continue
             P1, P2 = P[image_idx1], P[image_idx2]
-            points1 = images[image_idx1].features[track_obs[0, 1]]
-            points2 = images[image_idx2].features[track_obs[1, 1]]
+            points1 = images.features[image_idx1][track_obs[0, 1]]
+            points2 = images.features[image_idx2][track_obs[1, 1]]
             point4D = cv2.triangulatePoints(P1, P2, points1.T, points2.T)
             point3D = point4D[:3] / point4D[3]
-            tracks[track_id] = Track()
-            tracks[track_id].xyz = point3D.squeeze()
-            tracks[track_id].observations = track_obs'''
+            # Note: This code is commented out and not used
+            # Would need to use tracks.append() or similar if re-enabled
+            '''
     
     complete_and_merge_tracks(cameras, images, tracks, tracks_orig, TRIANGULATOR_OPTIONS)
 
@@ -255,5 +267,4 @@ def RetriangulateTracks(cameras, images, tracks, tracks_orig, TRIANGULATOR_OPTIO
             break
     
     # restore status of images
-    for i, image in enumerate(images):
-        image.is_registered = image_registered[i]
+    images.is_registered[:] = image_registered

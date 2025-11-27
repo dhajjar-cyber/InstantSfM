@@ -35,6 +35,9 @@
 
 **⚠️Please note that this repository is still under active development. We will keep updating it regularly. Feel free to open an issue if you encounter any problem.**
 
+## News📰  
+- **2025/11/27**: We changed the data structure into a more SIMD-friendly format, which further speeds up the whole pipeline by around 10%.  
+
 ## 1. Installation  
 **Note: The project requires an NVIDIA GPU with CUDA support. The code is tested on Ubuntu 20.04 with CUDA 12.1 and PyTorch 2.3.1.** 
 **Windows system is strongly unrecommended as the bae package lacks support for Windows.**  
