@@ -79,6 +79,9 @@ class TrackEngine:
                 dst_chunks.append(np.concatenate(current_dst_batch))
                 current_src_batch = []
                 current_dst_batch = []
+                sys.stdout.flush()
+
+        print("Loop finished. Processing remaining items...", flush=True)
 
         # Process remaining
         if current_src_batch:
@@ -86,14 +89,14 @@ class TrackEngine:
             dst_chunks.append(np.concatenate(current_dst_batch))
 
         if not src_chunks:
-            print("No valid matches found.")
+            print("No valid matches found.", flush=True)
             return
 
-        print(f"Concatenating {len(src_chunks)} chunks...")
+        print(f"Concatenating {len(src_chunks)} chunks...", flush=True)
         start_concat = time.time()
         all_src = np.concatenate(src_chunks)
         all_dst = np.concatenate(dst_chunks)
-        print(f"Concatenation took {time.time() - start_concat:.4f} seconds")
+        print(f"Concatenation took {time.time() - start_concat:.4f} seconds", flush=True)
         
         print(f"Constructing graph with {len(all_src)} edges...")
         
