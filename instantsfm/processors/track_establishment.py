@@ -167,55 +167,56 @@ class TrackEngine:
         sorted_counts = self.optimized_counts[sort_idx]
         
         # 2. Prepare data for tracks
-        # [image_id, feature_id, -count]
         self.log("Preparing track data...")
         image_ids = (sorted_ids >> 32).astype(np.int32)
         feature_ids = (sorted_ids & 0xFFFFFFFF).astype(np.int32)
         neg_counts = -sorted_counts.astype(np.int32)
         
-        track_data = np.stack([image_ids, feature_ids, neg_counts], axis=1)
+        # 3. Vectorized Filtering & Deduplication
+        self.log("Sorting tracks for filtering (Vectorized)...")
+        # Sort by track_id, image_id, count (ascending -> most negative count first)
+        sort_order = np.lexsort((neg_counts, image_ids, sorted_labels))
         
-        # 3. Split into tracks
-        self.log("Splitting into tracks...")
-        # Find indices where label changes
-        change_indices = np.where(sorted_labels[:-1] != sorted_labels[1:])[0] + 1
+        sorted_labels = sorted_labels[sort_order]
+        image_ids = image_ids[sort_order]
+        feature_ids = feature_ids[sort_order]
+        # neg_counts = neg_counts[sort_order] # Not needed after sort
         
-        track_arrays = np.split(track_data, change_indices)
-        track_ids = np.split(sorted_labels, change_indices)
-        unique_track_ids = [t[0] for t in track_ids]
+        # Identify duplicates (same track, same image)
+        # Since sorted, duplicates are adjacent
+        is_same_track_img = (sorted_labels[:-1] == sorted_labels[1:]) & (image_ids[:-1] == image_ids[1:])
         
-        self.log(f"Building dictionary with {len(unique_track_ids)} tracks...")
+        # Deduplication (Keep first of each track_id, image_id group)
+        # Since we sorted by count ascending (most negative first), the first one is the best.
+        self.log("Deduplicating tracks...")
+        keep_mask = np.concatenate(([True], ~is_same_track_img))
+        
+        # Apply mask
+        final_track_ids = sorted_labels[keep_mask]
+        final_image_ids = image_ids[keep_mask]
+        final_feature_ids = feature_ids[keep_mask]
+        
+        self.log(f"Kept {len(final_track_ids)} observations after deduplication.")
+        
+        # 4. Build Dictionary
+        self.log("Building final dictionary...")
+        
+        # Find indices where track_id changes
+        change_indices = np.where(final_track_ids[:-1] != final_track_ids[1:])[0] + 1
+        
+        # Split
+        # We need to reconstruct the (N, 2) arrays for each track.
+        # columns: [image_id, feature_id]
+        final_data = np.column_stack([final_image_ids, final_feature_ids])
+        track_arrays = np.split(final_data, change_indices)
+        unique_track_ids = np.split(final_track_ids, change_indices)
+        unique_track_ids = [t[0] for t in unique_track_ids]
+        
         tracks_dict = dict(zip(unique_track_ids, track_arrays))
         
         self.log(f"Track construction took {time.time() - start_track:.4f} seconds.")
-
-        discarded_counter = 0
-        for track_id in tqdm.tqdm(list(tracks_dict.keys()), desc="Track Filtering", file=sys.stdout):
-            # verify consistency of observations
-            image_id_set = {}
-            for image_id, feature_id, _ in tracks_dict[track_id]:
-                image_feature = self.images[image_id].features[feature_id]
-                if image_id not in image_id_set:
-                    image_id_set[image_id] = image_feature.reshape(1, 2)
-                else:
-                    features_array = image_id_set[image_id]
-                    distances = np.linalg.norm(features_array - image_feature, axis=1)
-                    if np.any(distances > TRACK_ESTABLISHMENT_OPTIONS['thres_inconsistency']):
-                        del tracks_dict[track_id]
-                        discarded_counter += 1
-                        break
-                    image_id_set[image_id] = np.vstack([features_array, image_feature.reshape(1, 2)])
-            if track_id not in tracks_dict:
-                continue
-            
-            # filter out multiple observations in the same image
-            correspondences = tracks_dict[track_id]
-            sort_by_prio, unique_indices = np.unique(correspondences[:, [0, 2]], axis=0, return_index=True)
-            unique_image_ids, unique_indices_ = np.unique(sort_by_prio[:, 0], return_index=True)
-            discarded_counter += len(correspondences) - len(unique_indices_)
-            tracks_dict[track_id] = correspondences[unique_indices[unique_indices_], :2]
-
-        self.log(f"Discarded {discarded_counter} features due to deduplication")
+        self.log(f"Final tracks: {len(tracks_dict)}")
+        
         return tracks_dict
 
     def TrackCollection(self, TRACK_ESTABLISHMENT_OPTIONS):
