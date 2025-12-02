@@ -29,8 +29,13 @@ class TrackEngine:
 
     def BlindConcatenationOptimized(self):
         # Optimized version using scipy.sparse.csgraph
-        all_src_ids = []
-        all_dst_ids = []
+        # Optimization: Use chunks to avoid passing 1.5M arrays to np.concatenate
+        CHUNK_SIZE = 100000
+        src_chunks = []
+        dst_chunks = []
+        
+        current_src_batch = []
+        current_dst_batch = []
 
         print("Collecting matches for graph construction...")
         # Pre-allocate or collect in list
@@ -64,15 +69,29 @@ class TrackEngine:
             src_ids = img1_shift | inlier_matches[:, 0].astype(np.int64)
             dst_ids = img2_shift | inlier_matches[:, 1].astype(np.int64)
             
-            all_src_ids.append(src_ids)
-            all_dst_ids.append(dst_ids)
+            current_src_batch.append(src_ids)
+            current_dst_batch.append(dst_ids)
+            
+            if len(current_src_batch) >= CHUNK_SIZE:
+                src_chunks.append(np.concatenate(current_src_batch))
+                dst_chunks.append(np.concatenate(current_dst_batch))
+                current_src_batch = []
+                current_dst_batch = []
 
-        if not all_src_ids:
+        # Process remaining
+        if current_src_batch:
+            src_chunks.append(np.concatenate(current_src_batch))
+            dst_chunks.append(np.concatenate(current_dst_batch))
+
+        if not src_chunks:
             print("No valid matches found.")
             return
 
-        all_src = np.concatenate(all_src_ids)
-        all_dst = np.concatenate(all_dst_ids)
+        print(f"Concatenating {len(src_chunks)} chunks...")
+        start_concat = time.time()
+        all_src = np.concatenate(src_chunks)
+        all_dst = np.concatenate(dst_chunks)
+        print(f"Concatenation took {time.time() - start_concat:.4f} seconds")
         
         print(f"Constructing graph with {len(all_src)} edges...")
         
