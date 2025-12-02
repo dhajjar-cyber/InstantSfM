@@ -73,6 +73,7 @@ class TrackEngine:
             current_dst_batch.append(dst_ids)
             
             if len(current_src_batch) >= CHUNK_SIZE:
+                tqdm.tqdm.write(f"Creating chunk {len(src_chunks) + 1}...")
                 src_chunks.append(np.concatenate(current_src_batch))
                 dst_chunks.append(np.concatenate(current_dst_batch))
                 current_src_batch = []
