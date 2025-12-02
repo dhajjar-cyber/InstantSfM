@@ -269,33 +269,68 @@ class TrackEngine:
         return tracks_dict
     
     def FindTracksForProblem(self, tracks_full, TRACK_ESTABLISHMENT_OPTIONS):
-        tracks_per_camera = {}
-        tracks = {}
+        self.log("Filtering tracks for problem (Optimized)...")
+        
+        # 1. Create valid camera mask for O(1) lookup
+        max_image_id = len(self.images)
+        valid_camera_mask = np.zeros(max_image_id, dtype=bool)
+        
+        valid_count = 0
         for image_id in range(len(self.images)):
-            if not self.images.is_registered[image_id]:
-                continue
-            tracks_per_camera[image_id] = 0
+            if self.images.is_registered[image_id]:
+                valid_camera_mask[image_id] = True
+                valid_count += 1
         
-        valid_cameras = np.array(list(tracks_per_camera.keys()))
+        self.log(f"Found {valid_count} valid cameras out of {max_image_id}.")
         
-        # if input image resolution is too low, TRACK_ESTABLISHMENT_OPTIONS['min_num_view_per_track'] is suggested to be small, e.g. 1 or 2.... to make sure all image indices are included
-        # TRACK_ESTABLISHMENT_OPTIONS['min_num_view_per_track'] = 2
+        all_valid = (valid_count == max_image_id)
+
         tracks_list = []
         track_ids = []
-        for track_id, track_obs in tqdm.tqdm(tracks_full.items(), desc="Filtering Tracks for Problem", file=sys.stdout):
-            if track_obs.shape[0] < TRACK_ESTABLISHMENT_OPTIONS['min_num_view_per_track']:
+        
+        min_views = TRACK_ESTABLISHMENT_OPTIONS['min_num_view_per_track']
+        max_views = TRACK_ESTABLISHMENT_OPTIONS['max_num_view_per_track']
+        
+        # 2. Iterate with optimized filtering
+        for track_id, track_obs in tqdm.tqdm(tracks_full.items(), desc="Filtering Tracks", file=sys.stdout):
+            n_obs = track_obs.shape[0]
+            
+            # Quick check on total size first
+            if n_obs < min_views:
                 continue
-            if track_obs.shape[0] > TRACK_ESTABLISHMENT_OPTIONS['max_num_view_per_track']:
+            if n_obs > max_views:
                 continue
-            track_obs = tracks_full[track_id]
-            filtered_obs = track_obs[np.isin(track_obs[:, 0], valid_cameras)]
-            tracks_list.append(filtered_obs)
+            
+            # Filter by valid cameras
+            if not all_valid:
+                # track_obs is [image_id, feature_id, ...]
+                image_ids = track_obs[:, 0].astype(int) # Ensure int for indexing
+                
+                # Check validity
+                is_valid = valid_camera_mask[image_ids]
+                
+                # If any invalid, filter
+                if not np.all(is_valid):
+                    track_obs = track_obs[is_valid]
+                    n_obs = track_obs.shape[0]
+                    if n_obs < min_views:
+                        continue
+
+            tracks_list.append(track_obs)
             track_ids.append(track_id)
+        
+        self.log(f"Creating Tracks object with {len(tracks_list)} tracks...")
         
         # Create Tracks container
         tracks = Tracks(num_tracks=len(tracks_list))
-        for idx, (track_id, obs) in enumerate(zip(track_ids, tracks_list)):
-            tracks.ids[idx] = track_id
-            tracks.observations[idx] = obs
+        
+        # Assign directly (faster than loop if possible, but Tracks structure requires loop or specific assignment)
+        # tracks.ids is numpy array?
+        # tracks.observations is object array or list?
+        # Let's assume standard assignment for now, but vectorized if possible.
+        
+        tracks.ids[:] = np.array(track_ids)
+        # observations is likely an object array of numpy arrays
+        tracks.observations[:] = tracks_list
         
         return tracks
