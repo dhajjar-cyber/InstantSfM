@@ -280,7 +280,7 @@ class RotationEstimator:
                 continue
             idx = self.image_id2idx[image_id]
             images.world2cams[image_id, :3, :3] = R.from_rotvec(self.rotation_estimated[idx:idx+3]).as_matrix()
-        view_graph.image_pairs.update(self.image_pairs)
+        
         print(f"RotationEstimator: total rotation averaging took {time.time() - start_time_total:.2f} seconds")
         sys.stdout.flush()
         return True

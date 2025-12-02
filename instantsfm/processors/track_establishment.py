@@ -2,6 +2,8 @@ from collections import defaultdict
 import numpy as np
 import tqdm
 import sys
+from scipy.sparse import coo_matrix
+from scipy.sparse.csgraph import connected_components
 
 from instantsfm.utils.union_find import UnionFind
 from instantsfm.scene.defs import Tracks, ViewGraph
@@ -16,11 +18,89 @@ class TrackEngine:
     def EstablishFullTracks(self, TRACK_ESTABLISHMENT_OPTIONS):
         import time
         start_time = time.time()
-        self.BlindConcatenation()
+        # self.BlindConcatenation()
+        self.BlindConcatenationOptimized()
         print(f"Blind concatenation took {time.time() - start_time} seconds")
         tracks = self.TrackCollection(TRACK_ESTABLISHMENT_OPTIONS)
         print(f"Track collection took {time.time() - start_time} seconds")
         return tracks
+
+    def BlindConcatenationOptimized(self):
+        # Optimized version using scipy.sparse.csgraph
+        all_src_ids = []
+        all_dst_ids = []
+
+        print("Collecting matches for graph construction...")
+        # Pre-allocate or collect in list
+        for pair in tqdm.tqdm(self.view_graph.image_pairs.values(), desc="Blind Concatenation (Optimized)", file=sys.stdout):
+            if not pair.is_valid:
+                continue
+            
+            if not hasattr(pair, 'matches') or pair.matches is None:
+                continue
+                
+            # Ensure matches is numpy array
+            matches = np.asarray(pair.matches)
+            if matches.shape[0] == 0:
+                continue
+                
+            if not pair.inliers or len(pair.inliers) == 0:
+                continue
+                
+            inlier_indices = np.array(pair.inliers, dtype=int)
+            inlier_matches = matches[inlier_indices]
+            
+            if inlier_matches.shape[0] == 0:
+                continue
+
+            # Vectorized global ID computation
+            # (image_id << 32) | point_id
+            # Ensure 64-bit integers
+            img1_shift = int(pair.image_id1) << 32
+            img2_shift = int(pair.image_id2) << 32
+            
+            src_ids = img1_shift | inlier_matches[:, 0].astype(np.int64)
+            dst_ids = img2_shift | inlier_matches[:, 1].astype(np.int64)
+            
+            all_src_ids.append(src_ids)
+            all_dst_ids.append(dst_ids)
+
+        if not all_src_ids:
+            print("No valid matches found.")
+            return
+
+        all_src = np.concatenate(all_src_ids)
+        all_dst = np.concatenate(all_dst_ids)
+        
+        print(f"Constructing graph with {len(all_src)} edges...")
+        
+        # Map global IDs to 0..N indices
+        unique_ids = np.unique(np.concatenate([all_src, all_dst]))
+        
+        # Vectorized mapping
+        src_indices = np.searchsorted(unique_ids, all_src)
+        dst_indices = np.searchsorted(unique_ids, all_dst)
+        
+        n_nodes = len(unique_ids)
+        
+        # Create adjacency matrix
+        data = np.ones(len(src_indices), dtype=bool)
+        graph = coo_matrix((data, (src_indices, dst_indices)), shape=(n_nodes, n_nodes))
+        
+        print("Finding connected components...")
+        n_components, labels = connected_components(csgraph=graph, directed=False, return_labels=True)
+        print(f"Found {n_components} tracks.")
+        
+        print("Updating UnionFind structure...")
+        # Find root for each component (first node in unique_ids that belongs to the component)
+        _, first_indices = np.unique(labels, return_index=True)
+        component_roots = unique_ids[first_indices]
+        
+        # Map every node to its component root
+        # self.uf.parent is a dict {global_id: parent_global_id}
+        self.uf.parent = dict(zip(unique_ids, component_roots[labels]))
+        
+        print("UnionFind update complete.")
 
     def BlindConcatenation(self):
         for pair in tqdm.tqdm(self.view_graph.image_pairs.values(), desc="Blind Concatenation", file=sys.stdout):
