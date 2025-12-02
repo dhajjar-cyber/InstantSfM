@@ -3,6 +3,7 @@ import numpy as np
 import tqdm
 import sys
 import time
+from datetime import datetime
 from scipy.sparse import coo_matrix
 from scipy.sparse.csgraph import connected_components
 
@@ -17,15 +18,18 @@ class TrackEngine:
         self.uf = UnionFind()
         self.node_counts = {}
 
+    def log(self, message):
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {message}", flush=True)
+
     def EstablishFullTracks(self, TRACK_ESTABLISHMENT_OPTIONS):
         import time
         start_time = time.time()
         # self.BlindConcatenation()
         self.BlindConcatenationOptimized()
-        print(f"Blind concatenation took {time.time() - start_time} seconds")
+        self.log(f"Blind concatenation took {time.time() - start_time} seconds")
         # tracks = self.TrackCollection(TRACK_ESTABLISHMENT_OPTIONS)
         tracks = self.TrackCollectionOptimized(TRACK_ESTABLISHMENT_OPTIONS)
-        print(f"Track collection took {time.time() - start_time} seconds")
+        self.log(f"Track collection took {time.time() - start_time} seconds")
         return tracks
 
     def BlindConcatenationOptimized(self):
@@ -38,7 +42,7 @@ class TrackEngine:
         current_src_batch = []
         current_dst_batch = []
 
-        print("Collecting matches for graph construction...")
+        self.log("Collecting matches for graph construction...")
         # Pre-allocate or collect in list
         for pair in tqdm.tqdm(self.view_graph.image_pairs.values(), desc="Blind Concatenation (Optimized)", file=sys.stdout):
             if not pair.is_valid:
@@ -81,7 +85,7 @@ class TrackEngine:
                 current_dst_batch = []
                 sys.stdout.flush()
 
-        print("Loop finished. Processing remaining items...", flush=True)
+        self.log("Loop finished. Processing remaining items...")
 
         # Process remaining
         if current_src_batch:
@@ -89,29 +93,29 @@ class TrackEngine:
             dst_chunks.append(np.concatenate(current_dst_batch))
 
         if not src_chunks:
-            print("No valid matches found.", flush=True)
+            self.log("No valid matches found.")
             return
 
-        print(f"Concatenating {len(src_chunks)} chunks...", flush=True)
+        self.log(f"Concatenating {len(src_chunks)} chunks...")
         start_concat = time.time()
         all_src = np.concatenate(src_chunks)
         all_dst = np.concatenate(dst_chunks)
-        print(f"Concatenation took {time.time() - start_concat:.4f} seconds", flush=True)
+        self.log(f"Concatenation took {time.time() - start_concat:.4f} seconds")
         
-        print(f"Constructing graph with {len(all_src)} edges...", flush=True)
+        self.log(f"Constructing graph with {len(all_src)} edges...")
         
         # Map global IDs to 0..N indices
-        print("Mapping global IDs to indices (np.unique)...", flush=True)
+        self.log("Mapping global IDs to indices (np.unique)...")
         start_unique = time.time()
         unique_ids = np.unique(np.concatenate([all_src, all_dst]))
-        print(f"Unique IDs computation took {time.time() - start_unique:.4f} seconds", flush=True)
+        self.log(f"Unique IDs computation took {time.time() - start_unique:.4f} seconds")
         
         # Vectorized mapping
-        print("Computing searchsorted indices...", flush=True)
+        self.log("Computing searchsorted indices...")
         start_search = time.time()
         src_indices = np.searchsorted(unique_ids, all_src)
         dst_indices = np.searchsorted(unique_ids, all_dst)
-        print(f"Index mapping took {time.time() - start_search:.4f} seconds", flush=True)
+        self.log(f"Index mapping took {time.time() - start_search:.4f} seconds")
         
         n_nodes = len(unique_ids)
         
@@ -119,12 +123,12 @@ class TrackEngine:
         data = np.ones(len(src_indices), dtype=bool)
         graph = coo_matrix((data, (src_indices, dst_indices)), shape=(n_nodes, n_nodes))
         
-        print("Finding connected components...", flush=True)
+        self.log("Finding connected components...")
         start_cc = time.time()
         n_components, labels = connected_components(csgraph=graph, directed=False, return_labels=True)
-        print(f"Found {n_components} tracks in {time.time() - start_cc:.4f} seconds.", flush=True)
+        self.log(f"Found {n_components} tracks in {time.time() - start_cc:.4f} seconds.")
         
-        print("Updating UnionFind structure...", flush=True)
+        self.log("Updating UnionFind structure...")
         # Find root for each component (first node in unique_ids that belongs to the component)
         _, first_indices = np.unique(labels, return_index=True)
         component_roots = unique_ids[first_indices]
@@ -133,10 +137,10 @@ class TrackEngine:
         # self.uf.parent is a dict {global_id: parent_global_id}
         self.uf.parent = dict(zip(unique_ids, component_roots[labels]))
         
-        print("UnionFind update complete.")
+        self.log("UnionFind update complete.")
 
         # Store node counts for TrackCollection
-        print("Computing node counts...")
+        self.log("Computing node counts...")
         all_nodes = np.concatenate([all_src, all_dst])
         unique_nodes, counts = np.unique(all_nodes, return_counts=True)
         self.node_counts = dict(zip(unique_nodes, counts))
@@ -158,7 +162,7 @@ class TrackEngine:
                     self.uf.Union(point_global_id2, point_global_id1)
     
     def TrackCollectionOptimized(self, TRACK_ESTABLISHMENT_OPTIONS):
-        print("Constructing tracks from UnionFind...")
+        self.log("Constructing tracks from UnionFind...")
         # Group nodes by track_id
         tracks_map = defaultdict(list)
         for node_id, root_id in self.uf.parent.items():
@@ -200,7 +204,7 @@ class TrackEngine:
             discarded_counter += len(correspondences) - len(unique_indices_)
             tracks_dict[track_id] = correspondences[unique_indices[unique_indices_], :2]
 
-        print(f"Discarded {discarded_counter} features due to deduplication")
+        self.log(f"Discarded {discarded_counter} features due to deduplication")
         return tracks_dict
 
     def TrackCollection(self, TRACK_ESTABLISHMENT_OPTIONS):
@@ -249,7 +253,7 @@ class TrackEngine:
             discarded_counter += len(correspondences) - len(unique_indices_)
             tracks_dict[track_id] = correspondences[unique_indices[unique_indices_], :2]
 
-        print(f"Discarded {discarded_counter} features due to deduplication")
+        self.log(f"Discarded {discarded_counter} features due to deduplication")
         return tracks_dict
     
     def FindTracksForProblem(self, tracks_full, TRACK_ESTABLISHMENT_OPTIONS):
