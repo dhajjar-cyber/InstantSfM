@@ -58,6 +58,8 @@ def SolveGlobalMapper(view_graph:ViewGraph, cameras, images, config:Config, dept
     print(f"Starting Global Mapper with {len(images.ids)} images and {len(view_graph.image_pairs)} pairs.")
     sys.stdout.flush()
 
+    print("==> Checking for checkpoint resume...")
+    sys.stdout.flush()
     checkpoint_path = config.OPTIONS.get('checkpoint_path', None)
     resume = config.OPTIONS.get('resume_from_checkpoint', False)
     tracks = None

@@ -34,21 +34,34 @@ def run_sfm():
     # Checkpoint loading logic
     checkpoint_loaded = False
     if mapper_args.resume and mapper_args.checkpoint_path and os.path.exists(mapper_args.checkpoint_path):
-        print(f"Loading checkpoint from {mapper_args.checkpoint_path}...")
+        print(f"==> Loading checkpoint from {mapper_args.checkpoint_path}...")
+        sys.stdout.flush()
         try:
             with open(mapper_args.checkpoint_path, 'rb') as f:
-                view_graph, cameras, images = pickle.load(f)
+                data = pickle.load(f)
+                if len(data) == 3:
+                    view_graph, cameras, images = data
+                elif len(data) == 4:
+                    view_graph, cameras, images, _ = data
+                else:
+                    raise ValueError("Unknown checkpoint format")
             feature_name = 'colmap' # Default assumption when loading from checkpoint
             checkpoint_loaded = True
-            print("Checkpoint loaded successfully. Skipping database read.")
+            print(f"==> Checkpoint loaded: {len(images.ids)} images, {len(view_graph.image_pairs)} pairs.")
+            sys.stdout.flush()
         except Exception as e:
             print(f"Failed to load checkpoint: {e}. Falling back to database read.")
+            sys.stdout.flush()
             checkpoint_loaded = False
 
     if not checkpoint_loaded:
+        print("==> Reading COLMAP database...")
+        sys.stdout.flush()
         view_graph, cameras, images, feature_name = ReadColmapDatabase(path_info.database_path)
         if view_graph is None or cameras is None or images is None:
             return
+        print(f"==> Database read: {len(images.ids)} images, {len(view_graph.image_pairs)} pairs.")
+        sys.stdout.flush()
 
     if path_info.depth_path and not mapper_args.disable_depths:
         if checkpoint_loaded:
@@ -60,8 +73,12 @@ def run_sfm():
         depths = None
 
     # enable different configs for different feature handlers and image numbers
+    print("==> Initializing configuration...")
+    sys.stdout.flush()
     start_time = time.time()
     config = Config(feature_name, mapper_args.manual_config_name)
+    print("==> Configuration loaded.")
+    sys.stdout.flush()
     
     # Override config with command line arguments
     # If we loaded checkpoint externally, we don't want global_mapper to load it again
@@ -87,6 +104,8 @@ def run_sfm():
                                                 save_dir=mapper_args.record_path if mapper_args.record_path else path_info.record_path)
     else:
         visualizer = None
+    print("==> Starting Global Mapper...")
+    sys.stdout.flush()
     cameras, images, tracks = SolveGlobalMapper(view_graph, cameras, images, config, depths=depths, visualizer=visualizer)
     print('Reconstruction done in', time.time() - start_time, 'seconds')
     WriteGlomapReconstruction(path_info.output_path, cameras, images, tracks, path_info.image_path, export_txt=mapper_args.export_txt)
