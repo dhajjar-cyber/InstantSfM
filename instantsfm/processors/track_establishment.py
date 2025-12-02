@@ -123,21 +123,21 @@ class TrackEngine:
         data = np.ones(len(src_indices), dtype=bool)
         graph = coo_matrix((data, (src_indices, dst_indices)), shape=(n_nodes, n_nodes))
         
-        self.log("Finding connected components...", flush=True)
+        self.log("Finding connected components...")
         start_cc = time.time()
         n_components, labels = connected_components(csgraph=graph, directed=False, return_labels=True)
-        self.log(f"Found {n_components} tracks in {time.time() - start_cc:.4f} seconds.", flush=True)
+        self.log(f"Found {n_components} tracks in {time.time() - start_cc:.4f} seconds.")
         
         # Store arrays for TrackCollectionOptimized
         self.optimized_unique_ids = unique_ids
         self.optimized_labels = labels
         
-        self.log("Computing node degrees...", flush=True)
+        self.log("Computing node degrees...")
         start_counts = time.time()
         # Compute degrees from indices (much faster than re-running np.unique)
         degrees = np.bincount(src_indices, minlength=n_nodes) + np.bincount(dst_indices, minlength=n_nodes)
         self.optimized_counts = degrees
-        self.log(f"Node degrees computed in {time.time() - start_counts:.4f} seconds.", flush=True)
+        self.log(f"Node degrees computed in {time.time() - start_counts:.4f} seconds.")
 
     def BlindConcatenation(self):
         for pair in tqdm.tqdm(self.view_graph.image_pairs.values(), desc="Blind Concatenation", file=sys.stdout):
@@ -156,11 +156,11 @@ class TrackEngine:
                     self.uf.Union(point_global_id2, point_global_id1)
     
     def TrackCollectionOptimized(self, TRACK_ESTABLISHMENT_OPTIONS):
-        self.log("Constructing tracks (Vectorized)...", flush=True)
+        self.log("Constructing tracks (Vectorized)...")
         start_track = time.time()
         
         # 1. Sort by label (Track ID)
-        self.log("Sorting by track ID...", flush=True)
+        self.log("Sorting by track ID...")
         sort_idx = np.argsort(self.optimized_labels)
         sorted_labels = self.optimized_labels[sort_idx]
         sorted_ids = self.optimized_unique_ids[sort_idx]
@@ -168,7 +168,7 @@ class TrackEngine:
         
         # 2. Prepare data for tracks
         # [image_id, feature_id, -count]
-        self.log("Preparing track data...", flush=True)
+        self.log("Preparing track data...")
         image_ids = (sorted_ids >> 32).astype(np.int32)
         feature_ids = (sorted_ids & 0xFFFFFFFF).astype(np.int32)
         neg_counts = -sorted_counts.astype(np.int32)
@@ -176,7 +176,7 @@ class TrackEngine:
         track_data = np.stack([image_ids, feature_ids, neg_counts], axis=1)
         
         # 3. Split into tracks
-        self.log("Splitting into tracks...", flush=True)
+        self.log("Splitting into tracks...")
         # Find indices where label changes
         change_indices = np.where(sorted_labels[:-1] != sorted_labels[1:])[0] + 1
         
@@ -184,10 +184,10 @@ class TrackEngine:
         track_ids = np.split(sorted_labels, change_indices)
         unique_track_ids = [t[0] for t in track_ids]
         
-        self.log(f"Building dictionary with {len(unique_track_ids)} tracks...", flush=True)
+        self.log(f"Building dictionary with {len(unique_track_ids)} tracks...")
         tracks_dict = dict(zip(unique_track_ids, track_arrays))
         
-        self.log(f"Track construction took {time.time() - start_track:.4f} seconds.", flush=True)
+        self.log(f"Track construction took {time.time() - start_track:.4f} seconds.")
 
         discarded_counter = 0
         for track_id in tqdm.tqdm(list(tracks_dict.keys()), desc="Track Filtering", file=sys.stdout):
