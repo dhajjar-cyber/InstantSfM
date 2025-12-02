@@ -1,5 +1,6 @@
 from queue import Queue
 import numpy as np
+import sys
 from enum import Enum
 import cv2
 from typing import List, Optional, Dict, Tuple, Union
@@ -1092,6 +1093,7 @@ class ViewGraph:
             self.visited[image_id] = False
 
         print(f"Finding connected components for {total_nodes} nodes...")
+        sys.stdout.flush()
         for image_id in self.adjacency_list.keys():
             if not self.visited[image_id]:
                 component = self.BFS(image_id)
@@ -1099,6 +1101,7 @@ class ViewGraph:
                 visited_count += len(component)
                 if visited_count % 1000 == 0 or visited_count == total_nodes:
                     print(f"BFS Progress: Visited {visited_count} / {total_nodes} nodes ({visited_count/total_nodes*100:.1f}%)")
+                    sys.stdout.flush()
 
     def find_connected_component_scipy(self):
         try:
@@ -1106,10 +1109,12 @@ class ViewGraph:
             from scipy.sparse.csgraph import connected_components
         except ImportError:
             print("Scipy not found. Falling back to standard BFS.")
+            sys.stdout.flush()
             self.find_connected_component()
             return
 
         print("Using Scipy for connected components...")
+        sys.stdout.flush()
         
         valid_pairs = [p for p in self.image_pairs.values() if p.is_valid]
         
@@ -1147,6 +1152,7 @@ class ViewGraph:
             
         self.connected_component = list(comps.values())
         print(f"Scipy found {len(self.connected_component)} components.")
+        sys.stdout.flush()
 
     def keep_largest_connected_component(self, images: Images) -> bool:
         """Keep only the largest connected component.
@@ -1163,6 +1169,7 @@ class ViewGraph:
         component_sizes = [len(c) for c in self.connected_component]
         component_sizes.sort(reverse=True)
         print(f"Found {len(self.connected_component)} connected components with sizes: {component_sizes}")
+        sys.stdout.flush()
 
         max_idx = -1
         max_img = 0

@@ -1,12 +1,24 @@
 import numpy as np
+import sys
 from scipy.sparse import csc_matrix
 from sksparse.cholmod import cholesky
 
 class L1Solver:
     def __init__(self, mat):
+        print("L1Solver: Initializing...")
+        sys.stdout.flush()
         self.a_ = mat
+        print(f"L1Solver: Computing A^T @ A (shape: {self.a_.shape})...")
+        sys.stdout.flush()
         spd_mat = self.a_.T @ self.a_
-        self.linear_solver_ = cholesky(csc_matrix(spd_mat))
+        print("L1Solver: Converting to CSC matrix...")
+        sys.stdout.flush()
+        csc_spd = csc_matrix(spd_mat)
+        print("L1Solver: Computing Cholesky decomposition...")
+        sys.stdout.flush()
+        self.linear_solver_ = cholesky(csc_spd)
+        print("L1Solver: Initialization complete.")
+        sys.stdout.flush()
 
     def solve(self, rhs, L1_SOLVER_OPTIONS):
         x = np.zeros(self.a_.shape[1])

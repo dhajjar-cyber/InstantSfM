@@ -1,5 +1,6 @@
 import numpy as np
 import tqdm
+import sys
 
 from instantsfm.utils.cost_function import reproject_funcs
 from instantsfm.scene.defs import get_camera_model_info
@@ -162,7 +163,7 @@ class TorchBA():
 
         window_size = 4
         loss_history = []
-        progress_bar = tqdm.trange(BUNDLE_ADJUSTER_OPTIONS['max_num_iterations'])
+        progress_bar = tqdm.trange(BUNDLE_ADJUSTER_OPTIONS['max_num_iterations'], file=sys.stdout)
         for _ in progress_bar:
             loss = optimizer.step(input)
             loss_history.append(loss.item())
@@ -364,7 +365,7 @@ class TorchBA():
 
         window_size = 4
         loss_history = []
-        progress_bar = tqdm.trange(BUNDLE_ADJUSTER_OPTIONS['max_num_iterations'])
+        progress_bar = tqdm.trange(BUNDLE_ADJUSTER_OPTIONS['max_num_iterations'], file=sys.stdout)
         for _ in progress_bar:
             loss = optimizer.step(input)
             loss_history.append(loss.item())

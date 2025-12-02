@@ -1,5 +1,8 @@
 import time
 import numpy as np
+import sys
+import pickle
+import os
 
 from instantsfm.scene.defs import ViewGraph
 from instantsfm.controllers.config import Config
@@ -18,34 +21,86 @@ from instantsfm.processors.bundle_adjustment import TorchBA
 from instantsfm.processors.track_retriangulation import RetriangulateTracks
 from instantsfm.processors.reconstruction_pruning import PruneWeaklyConnectedImages
 
+def save_checkpoint(path, view_graph, cameras, images):
+    try:
+        print(f"Saving checkpoint to {path}...")
+        sys.stdout.flush()
+        with open(path, 'wb') as f:
+            pickle.dump((view_graph, cameras, images), f)
+        print(f"Successfully saved checkpoint to {path}.")
+        sys.stdout.flush()
+    except Exception as e:
+        print(f"Error saving checkpoint to {path}: {e}")
+        sys.stdout.flush()
+
+def load_checkpoint(path):
+    try:
+        print(f"Loading checkpoint from {path}...")
+        sys.stdout.flush()
+        with open(path, 'rb') as f:
+            view_graph, cameras, images = pickle.load(f)
+        print(f"Successfully loaded checkpoint from {path}.")
+        sys.stdout.flush()
+        return view_graph, cameras, images
+    except Exception as e:
+        print(f"Error loading checkpoint from {path}: {e}")
+        sys.stdout.flush()
+        return None, None, None
 
 def SolveGlobalMapper(view_graph:ViewGraph, cameras, images, config:Config, depths=None, visualizer=None):    
     print(f"Starting Global Mapper with {len(images.ids)} images and {len(view_graph.image_pairs)} pairs.")
+    sys.stdout.flush()
+
+    checkpoint_path = config.OPTIONS.get('checkpoint_path', None)
+    resume = config.OPTIONS.get('resume_from_checkpoint', False)
+
+    if resume and checkpoint_path and os.path.exists(checkpoint_path):
+        loaded_vg, loaded_cams, loaded_imgs = load_checkpoint(checkpoint_path)
+        if loaded_vg is not None:
+            view_graph, cameras, images = loaded_vg, loaded_cams, loaded_imgs
+            config.OPTIONS['skip_preprocessing'] = True
+            config.OPTIONS['skip_view_graph_calibration'] = True
+            config.OPTIONS['skip_relative_pose_estimation'] = True
+            print("Resuming from checkpoint, skipping preprocessing and relative pose estimation.")
+        else:
+            print("Failed to load checkpoint. Proceeding with full pipeline.")
+        sys.stdout.flush()
+    elif resume and checkpoint_path:
+        print(f"Checkpoint not found at {checkpoint_path}. Proceeding with full pipeline.")
+        sys.stdout.flush()
+
     if not config.OPTIONS['skip_preprocessing']:
         print('-------------------------------------')
         print('Running preprocessing ...')
         print('-------------------------------------')
+        sys.stdout.flush()
         start_time = time.time()
         print('Step 1/2: UpdateImagePairsConfig...')
+        sys.stdout.flush()
         UpdateImagePairsConfig(view_graph, cameras, images)
         print('Step 2/2: DecomposeRelPose...')
+        sys.stdout.flush()
         DecomposeRelPose(view_graph, cameras, images)
         print('Preprocessing took: ', time.time() - start_time)
+        sys.stdout.flush()
 
     if not config.OPTIONS['skip_view_graph_calibration']:
         print('-------------------------------------')
         print('Running view graph calibration (Ceres) ...')
         print('-------------------------------------')
+        sys.stdout.flush()
         start_time = time.time()
         # vgc_engine = TorchVGC()
         # vgc_engine.Optimize(view_graph, cameras, images, config.VIEW_GRAPH_CALIBRATOR_OPTIONS)
         SolveViewGraphCalibration(view_graph, cameras, images, config.VIEW_GRAPH_CALIBRATOR_OPTIONS)
         print('View graph calibration took: ', time.time() - start_time)
+        sys.stdout.flush()
         
     if not config.OPTIONS['skip_relative_pose_estimation']:
         print('-------------------------------------')
         print('Running relative pose estimation ...')
         print('-------------------------------------')
+        sys.stdout.flush()
         start_time = time.time()
         UndistortImages(cameras, images)
         use_poselib = False
@@ -56,46 +111,61 @@ def SolveGlobalMapper(view_graph:ViewGraph, cameras, images, config:Config, dept
             EstimateRelativePose(view_graph, cameras, images)
         
         print("Filtering pairs by inlier number...")
+        sys.stdout.flush()
         FilterInlierNum(view_graph, config.INLIER_THRESHOLD_OPTIONS['min_inlier_num'])
         print("Filtering pairs by inlier ratio...")
+        sys.stdout.flush()
         FilterInlierRatio(view_graph, config.INLIER_THRESHOLD_OPTIONS['min_inlier_ratio'])
         print("Keeping largest connected component...")
+        sys.stdout.flush()
         view_graph.keep_largest_connected_component(images)
+        
+        if checkpoint_path:
+             save_checkpoint(checkpoint_path, view_graph, cameras, images)
+
         print('Relative pose estimation took: ', time.time() - start_time)
+        sys.stdout.flush()
 
     if not config.OPTIONS['skip_rotation_averaging']:
         print('-------------------------------------')
         print('Running rotation averaging ...')
         print('-------------------------------------')
+        sys.stdout.flush()
         start_time = time.time()
         ra_engine = RotationEstimator()
         ra_engine.EstimateRotations(view_graph, images, config.ROTATION_ESTIMATOR_OPTIONS, config.L1_SOLVER_OPTIONS)
         FilterRotations(view_graph, images, config.INLIER_THRESHOLD_OPTIONS['max_rotation_error'])
         if not view_graph.keep_largest_connected_component(images):
             print('Failed to keep the largest connected component.')
+            sys.stdout.flush()
             exit()
 
         ra_engine.EstimateRotations(view_graph, images, config.ROTATION_ESTIMATOR_OPTIONS, config.L1_SOLVER_OPTIONS)
         FilterRotations(view_graph, images, config.INLIER_THRESHOLD_OPTIONS['max_rotation_error'])
         if not view_graph.keep_largest_connected_component(images):
             print('Failed to keep the largest connected component.')
+            sys.stdout.flush()
             exit()
         num_img = np.sum(images.is_registered)
         print(num_img, '/', len(images), 'images are within the connected component.')
         print('Rotation averaging took: ', time.time() - start_time)
+        sys.stdout.flush()
 
     if not config.OPTIONS['skip_track_establishment']:
         print('-------------------------------------')
         print('Running track establishment ...')
         print('-------------------------------------')
+        sys.stdout.flush()
         start_time = time.time()
         track_engine = TrackEngine(view_graph, images)
         tracks_orig = track_engine.EstablishFullTracks(config.TRACK_ESTABLISHMENT_OPTIONS)
         print('Initialized', len(tracks_orig), 'tracks')
+        sys.stdout.flush()
 
         tracks = track_engine.FindTracksForProblem(tracks_orig, config.TRACK_ESTABLISHMENT_OPTIONS)
         print('Before filtering:', len(tracks_orig), ', after filtering:', len(tracks))
         print('Track establishment took: ', time.time() - start_time)
+        sys.stdout.flush()
 
     if not config.OPTIONS['skip_global_positioning']:
         print('-------------------------------------')

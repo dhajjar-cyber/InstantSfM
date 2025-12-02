@@ -1,5 +1,6 @@
 import numpy as np
 import tqdm
+import sys
 
 
 from instantsfm.utils.cost_function import pairwise_cost
@@ -172,7 +173,7 @@ class TorchGP():
 
         window_size = 4
         loss_history = []
-        progress_bar = tqdm.trange(GLOBAL_POSITIONER_OPTIONS['max_num_iterations'])
+        progress_bar = tqdm.trange(GLOBAL_POSITIONER_OPTIONS['max_num_iterations'], file=sys.stdout)
         for _ in progress_bar:
             loss = optimizer.step(input)
             loss_history.append(loss.item())
@@ -384,7 +385,7 @@ class TorchGP():
         }
         window_size = 4
         loss_history = []
-        progress_bar = tqdm.trange(GLOBAL_POSITIONER_OPTIONS['max_num_iterations'])
+        progress_bar = tqdm.trange(GLOBAL_POSITIONER_OPTIONS['max_num_iterations'], file=sys.stdout)
         for _ in progress_bar:
             loss = optimizer.step(input)
             loss_history.append(loss.item())

@@ -1,5 +1,6 @@
 import numpy as np
 import os
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from tqdm import tqdm
 
@@ -33,7 +34,7 @@ def FilterRotations(view_graph:ViewGraph, images, max_angle):
     args_list = [(pair, images, max_angle) for pair in pairs]
     
     with ThreadPoolExecutor(max_workers=num_threads) as executor:
-        results = list(tqdm(executor.map(_check_rotation_pair, args_list), total=len(pairs), desc="Filtering Rotations"))
+        results = list(tqdm(executor.map(_check_rotation_pair, args_list), total=len(pairs), desc="Filtering Rotations", file=sys.stdout))
     
     num_invalid = sum(results)
     print('Filtered', num_invalid, 'relative rotation with angle >', max_angle, 'degrees')
@@ -56,7 +57,7 @@ def FilterInlierNum(view_graph:ViewGraph, min_inlier_num):
     args_list = [(pair, min_inlier_num) for pair in pairs]
 
     with ThreadPoolExecutor(max_workers=num_threads) as executor:
-        results = list(tqdm(executor.map(_check_inlier_num, args_list), total=len(pairs), desc="Filtering Inlier Num"))
+        results = list(tqdm(executor.map(_check_inlier_num, args_list), total=len(pairs), desc="Filtering Inlier Num", file=sys.stdout))
 
     num_invalid = sum(results)
     print('Filtered', num_invalid, 'relative pose with inlier number <', min_inlier_num)
@@ -81,7 +82,7 @@ def FilterInlierRatio(view_graph:ViewGraph, min_inlier_ratio):
     args_list = [(pair, min_inlier_ratio) for pair in pairs]
 
     with ThreadPoolExecutor(max_workers=num_threads) as executor:
-        results = list(tqdm(executor.map(_check_inlier_ratio, args_list), total=len(pairs), desc="Filtering Inlier Ratio"))
+        results = list(tqdm(executor.map(_check_inlier_ratio, args_list), total=len(pairs), desc="Filtering Inlier Ratio", file=sys.stdout))
 
     num_invalid = sum(results)
     print('Filtered', num_invalid, 'relative pose with inlier ratio <', min_inlier_ratio)

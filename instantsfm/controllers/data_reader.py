@@ -3,6 +3,9 @@ import time
 import os
 import cv2
 import glob
+import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from tqdm import tqdm
 
 from instantsfm.scene.defs import Images, ImagePair, Cameras, ConfigurationType, CameraModelId, ViewGraph
 from instantsfm.utils.database import COLMAPDatabase, blob_to_array
@@ -131,43 +134,71 @@ def ReadColmapDatabase(path):
         'DATA_NONE': 0
     }
 
-    for idx, group in enumerate(matches_list):
-        if idx % 1000 == 0 and idx > 0:
-            print(f"Processed {idx}/{total_matches} pairs...")
-        pair_id, data, config, F_blob, E_blob, H_blob = group
-        if data is None:
-            invalid_count += 1
-            rejection_reasons['DATA_NONE'] += 1
-            continue
-        data = blob_to_array(data, np.uint32, (-1, 2))
-        # Convert COLMAP pair_id to image IDs
-        image_id2 = pair_id % 2147483647
-        image_id1 = (pair_id - image_id2) // 2147483647
-        pair_key = (image_id1, image_id2)
-        image_pairs[pair_key] = ImagePair(image_id1=image_id1, image_id2=image_id2)
-        keypoints1 = images_dict[image_id1]['features']
-        keypoints2 = images_dict[image_id2]['features']
-        idx1 = data[:, 0]
-        idx2 = data[:, 1]
-        valid_indices = (idx1 != -1) & (idx2 != -1) & (idx1 < len(keypoints1)) & (idx2 < len(keypoints2))
-        valid_matches = data[valid_indices]
-        image_pairs[pair_key].matches = valid_matches
+    def process_match_chunk(chunk):
+        chunk_results = []
+        chunk_invalid = 0
+        chunk_reasons = {k: 0 for k in rejection_reasons}
+        
+        for group in chunk:
+            pair_id, data, config, F_blob, E_blob, H_blob = group
+            if data is None:
+                chunk_invalid += 1
+                chunk_reasons['DATA_NONE'] += 1
+                continue
+            data = blob_to_array(data, np.uint32, (-1, 2))
+            # Convert COLMAP pair_id to image IDs
+            image_id2 = pair_id % 2147483647
+            image_id1 = (pair_id - image_id2) // 2147483647
+            pair_key = (image_id1, image_id2)
+            
+            image_pair = ImagePair(image_id1=image_id1, image_id2=image_id2)
+            
+            keypoints1 = images_dict[image_id1]['features']
+            keypoints2 = images_dict[image_id2]['features']
+            idx1 = data[:, 0]
+            idx2 = data[:, 1]
+            valid_indices = (idx1 != -1) & (idx2 != -1) & (idx1 < len(keypoints1)) & (idx2 < len(keypoints2))
+            valid_matches = data[valid_indices]
+            image_pair.matches = valid_matches
 
-        config = ConfigurationType(config)
-        image_pairs[pair_key].config = config
-        if config in [ConfigurationType.UNDEFINED, ConfigurationType.DEGENERATE, ConfigurationType.WATERMARK, ConfigurationType.MULTIPLE]:
-            image_pairs[pair_key].is_valid = False
-            invalid_count += 1
-            rejection_reasons[config.name] += 1
-            continue
+            config = ConfigurationType(config)
+            image_pair.config = config
+            if config in [ConfigurationType.UNDEFINED, ConfigurationType.DEGENERATE, ConfigurationType.WATERMARK, ConfigurationType.MULTIPLE]:
+                image_pair.is_valid = False
+                chunk_invalid += 1
+                chunk_reasons[config.name] += 1
+                chunk_results.append((pair_key, image_pair))
+                continue
 
-        F = blob_to_array(F_blob, np.float64).reshape(3, 3)
-        E = blob_to_array(E_blob, np.float64).reshape(3, 3)
-        H = blob_to_array(H_blob, np.float64).reshape(3, 3)
-        image_pairs[pair_key].F = F
-        image_pairs[pair_key].E = E
-        image_pairs[pair_key].H = H
-        image_pairs[pair_key].config = config
+            F = blob_to_array(F_blob, np.float64).reshape(3, 3)
+            E = blob_to_array(E_blob, np.float64).reshape(3, 3)
+            H = blob_to_array(H_blob, np.float64).reshape(3, 3)
+            image_pair.F = F
+            image_pair.E = E
+            image_pair.H = H
+            image_pair.config = config
+            chunk_results.append((pair_key, image_pair))
+            
+        return chunk_results, chunk_invalid, chunk_reasons
+
+    # Chunk size for parallel processing
+    chunk_size = 5000
+    chunks = [matches_list[i:i + chunk_size] for i in range(0, len(matches_list), chunk_size)]
+    
+    num_threads = int(os.environ.get('POSE_ESTIMATION_THREADS', 64))
+    print(f"Processing matches with {num_threads} threads...")
+    sys.stdout.flush()
+
+    with ThreadPoolExecutor(max_workers=num_threads) as executor:
+        futures = [executor.submit(process_match_chunk, chunk) for chunk in chunks]
+        
+        for future in tqdm(as_completed(futures), total=len(futures), desc="Processing Matches", file=sys.stdout):
+            chunk_results, chunk_invalid, chunk_reasons = future.result()
+            invalid_count += chunk_invalid
+            for k, v in chunk_reasons.items():
+                rejection_reasons[k] += v
+            for pair_key, image_pair in chunk_results:
+                image_pairs[pair_key] = image_pair
 
     view_graph.image_pairs = {pair_key: image_pair for pair_key, image_pair in image_pairs.items() if image_pair.is_valid}
     print(f'Pairs read done. {invalid_count} / {len(image_pairs)+invalid_count} are invalid')

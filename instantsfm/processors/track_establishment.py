@@ -1,5 +1,7 @@
 from collections import defaultdict
 import numpy as np
+import tqdm
+import sys
 
 from instantsfm.utils.union_find import UnionFind
 from instantsfm.scene.defs import Tracks, ViewGraph
@@ -21,7 +23,7 @@ class TrackEngine:
         return tracks
 
     def BlindConcatenation(self):
-        for pair in self.view_graph.image_pairs.values():
+        for pair in tqdm.tqdm(self.view_graph.image_pairs.values(), desc="Blind Concatenation", file=sys.stdout):
             if not pair.is_valid:
                 continue
             matches = pair.matches
@@ -38,7 +40,7 @@ class TrackEngine:
     
     def TrackCollection(self, TRACK_ESTABLISHMENT_OPTIONS):
         track_map = {}
-        for pair in self.view_graph.image_pairs.values():
+        for pair in tqdm.tqdm(self.view_graph.image_pairs.values(), desc="Track Collection", file=sys.stdout):
             if not pair.is_valid:
                 continue
             for idx in pair.inliers:
@@ -57,7 +59,7 @@ class TrackEngine:
                                             -np.array(list(correspondences.values()))[:, None]], axis=-1) 
                                             for track_id, correspondences in track_map.items()}
         discarded_counter = 0
-        for track_id in list(tracks_dict.keys()):
+        for track_id in tqdm.tqdm(list(tracks_dict.keys()), desc="Track Filtering", file=sys.stdout):
             # verify consistency of observations
             image_id_set = {}
             for image_id, feature_id, _ in tracks_dict[track_id]:

@@ -1,13 +1,16 @@
 import time
+import pickle
+import os
 from argparse import ArgumentParser
 
 from instantsfm.controllers.config import Config
-from instantsfm.controllers.data_reader import ReadData, ReadColmapDatabase, ReadDepthsIntoFeatures
+from instantsfm.controllers.data_reader import ReadData, ReadColmapDatabase, ReadDepthsIntoFeatures, ReadDepths
 from instantsfm.controllers.global_mapper import SolveGlobalMapper
 from instantsfm.controllers.reconstruction_writer import WriteGlomapReconstruction
 from instantsfm.controllers.reconstruction_visualizer import ReconstructionVisualizer
 
 def run_sfm():
+    print("DEBUG: Running modified sfm.py from workspace")
     parser = ArgumentParser()
     parser.add_argument('--data_path', required=True, help='Path to the data folder')
     parser.add_argument('--enable_gui', action='store_true', help='Enable GUI for visualization')
@@ -16,6 +19,8 @@ def run_sfm():
     parser.add_argument('--disable_depths', action='store_true', help='Disable the use of depths if available')
     parser.add_argument('--export_txt', action='store_true', help='Export the reconstruction in plain text format')
     parser.add_argument('--manual_config_name', help='Name of the manual configuration file')
+    parser.add_argument('--resume', action='store_true', help='Resume from checkpoint if available')
+    parser.add_argument('--checkpoint_path', help='Path to the checkpoint file')
     mapper_args = parser.parse_args()
 
     path_info = ReadData(mapper_args.data_path)
@@ -23,17 +28,49 @@ def run_sfm():
         print('Invalid data path, please check the provided path')
         return
     
-    view_graph, cameras, images, feature_name = ReadColmapDatabase(path_info.database_path)
-    if view_graph is None or cameras is None or images is None:
-        return
+    # Checkpoint loading logic
+    checkpoint_loaded = False
+    if mapper_args.resume and mapper_args.checkpoint_path and os.path.exists(mapper_args.checkpoint_path):
+        print(f"Loading checkpoint from {mapper_args.checkpoint_path}...")
+        try:
+            with open(mapper_args.checkpoint_path, 'rb') as f:
+                view_graph, cameras, images = pickle.load(f)
+            feature_name = 'colmap' # Default assumption when loading from checkpoint
+            checkpoint_loaded = True
+            print("Checkpoint loaded successfully. Skipping database read.")
+        except Exception as e:
+            print(f"Failed to load checkpoint: {e}. Falling back to database read.")
+            checkpoint_loaded = False
+
+    if not checkpoint_loaded:
+        view_graph, cameras, images, feature_name = ReadColmapDatabase(path_info.database_path)
+        if view_graph is None or cameras is None or images is None:
+            return
+
     if path_info.depth_path and not mapper_args.disable_depths:
-        depths = ReadDepthsIntoFeatures(path_info.depth_path, cameras, images)
+        if checkpoint_loaded:
+            print("Loading raw depths for global positioning...")
+            depths = ReadDepths(path_info.depth_path)
+        else:
+            depths = ReadDepthsIntoFeatures(path_info.depth_path, cameras, images)
     else:
         depths = None
 
     # enable different configs for different feature handlers and image numbers
     start_time = time.time()
     config = Config(feature_name, mapper_args.manual_config_name)
+    
+    # Override config with command line arguments
+    # If we loaded checkpoint externally, we don't want global_mapper to load it again
+    config.OPTIONS['resume_from_checkpoint'] = False if checkpoint_loaded else mapper_args.resume
+    config.OPTIONS['checkpoint_path'] = mapper_args.checkpoint_path
+    
+    # If checkpoint was loaded here, set skip flags
+    if checkpoint_loaded:
+        config.OPTIONS['skip_preprocessing'] = True
+        config.OPTIONS['skip_view_graph_calibration'] = True
+        config.OPTIONS['skip_relative_pose_estimation'] = True
+
     if mapper_args.enable_gui or mapper_args.record_recon:
         visualizer = ReconstructionVisualizer(save_data=mapper_args.record_recon, 
                                                 save_dir=mapper_args.record_path if mapper_args.record_path else path_info.record_path)

@@ -16,6 +16,9 @@ GENERAL_OPTIONS = {
     'skip_pruning': True,
     # used in feature handling
     'uniform_camera': True, 
+    # checkpointing
+    'resume_from_checkpoint': True,
+    'checkpoint_path': 'checkpoint_relpose.pkl',
 }
 
 class Config:
