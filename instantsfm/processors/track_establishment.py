@@ -198,6 +198,61 @@ class TrackEngine:
         
         self.log(f"Kept {len(final_track_ids)} observations after deduplication.")
         
+        # --- NEW: Vectorized Filtering for Problem (Camera Validity & Track Length) ---
+        self.log("Filtering tracks for problem (Vectorized)...")
+        
+        # A. Filter by Valid Cameras
+        # Create a boolean lookup table for valid cameras
+        num_images = len(self.images)
+        is_valid_camera = np.zeros(num_images, dtype=bool)
+        for i in range(num_images):
+            if self.images.is_registered[i]:
+                is_valid_camera[i] = True
+        
+        # Apply camera filter
+        valid_cam_mask = is_valid_camera[final_image_ids]
+        
+        # Apply mask to data
+        final_track_ids = final_track_ids[valid_cam_mask]
+        final_image_ids = final_image_ids[valid_cam_mask]
+        final_feature_ids = final_feature_ids[valid_cam_mask]
+        
+        self.log(f"Kept {len(final_track_ids)} observations after camera filtering.")
+        
+        # B. Filter by Track Length (Min/Max Views)
+        # Re-compute track lengths after camera filtering
+        # Since track_ids are sorted, we can use run-length encoding or bincount if IDs are contiguous.
+        # But IDs are large and sparse. np.unique with return_counts is safest here.
+        self.log("Computing track lengths...")
+        unique_tracks, track_lengths = np.unique(final_track_ids, return_counts=True)
+        
+        # Create mask for valid tracks
+        min_views = TRACK_ESTABLISHMENT_OPTIONS.get('min_num_view_per_track', 2)
+        max_views = TRACK_ESTABLISHMENT_OPTIONS.get('max_num_view_per_track', 10000) # Default high
+        
+        valid_track_mask = (track_lengths >= min_views) & (track_lengths <= max_views)
+        valid_track_ids_set = unique_tracks[valid_track_mask]
+        
+        self.log(f"Found {len(valid_track_ids_set)} valid tracks out of {len(unique_tracks)}.")
+        
+        # Filter observations to keep only those belonging to valid tracks
+        # Using np.isin is okay here because we are filtering the sorted array
+        # Optimization: Since final_track_ids is sorted, we can use searchsorted
+        self.log("Applying track length filter...")
+        
+        # Create a boolean mask for the observations
+        # We can map track_ids to a boolean array if we compress the IDs, but searchsorted is good.
+        # Or better: use the fact that they are sorted.
+        # We can expand the valid_track_mask back to observations.
+        # Since unique_tracks corresponds to the blocks in final_track_ids:
+        obs_keep_mask = np.repeat(valid_track_mask, track_lengths)
+        
+        final_track_ids = final_track_ids[obs_keep_mask]
+        final_image_ids = final_image_ids[obs_keep_mask]
+        final_feature_ids = final_feature_ids[obs_keep_mask]
+        
+        self.log(f"Kept {len(final_track_ids)} observations after length filtering.")
+
         # 4. Build Dictionary
         self.log("Building final dictionary...")
         
@@ -269,68 +324,20 @@ class TrackEngine:
         return tracks_dict
     
     def FindTracksForProblem(self, tracks_full, TRACK_ESTABLISHMENT_OPTIONS):
-        self.log("Filtering tracks for problem (Optimized)...")
+        self.log("Converting tracks dictionary to Tracks object...")
+        start_convert = time.time()
         
-        # 1. Create valid camera mask for O(1) lookup
-        max_image_id = len(self.images)
-        valid_camera_mask = np.zeros(max_image_id, dtype=bool)
+        # Since filtering is now done in TrackCollectionOptimized, 
+        # this function just converts the dictionary to the Tracks object format.
         
-        valid_count = 0
-        for image_id in range(len(self.images)):
-            if self.images.is_registered[image_id]:
-                valid_camera_mask[image_id] = True
-                valid_count += 1
-        
-        self.log(f"Found {valid_count} valid cameras out of {max_image_id}.")
-        
-        all_valid = (valid_count == max_image_id)
-
-        tracks_list = []
-        track_ids = []
-        
-        min_views = TRACK_ESTABLISHMENT_OPTIONS['min_num_view_per_track']
-        max_views = TRACK_ESTABLISHMENT_OPTIONS['max_num_view_per_track']
-        
-        # 2. Iterate with optimized filtering
-        for track_id, track_obs in tqdm.tqdm(tracks_full.items(), desc="Filtering Tracks", file=sys.stdout):
-            n_obs = track_obs.shape[0]
-            
-            # Quick check on total size first
-            if n_obs < min_views:
-                continue
-            if n_obs > max_views:
-                continue
-            
-            # Filter by valid cameras
-            if not all_valid:
-                # track_obs is [image_id, feature_id, ...]
-                image_ids = track_obs[:, 0].astype(int) # Ensure int for indexing
-                
-                # Check validity
-                is_valid = valid_camera_mask[image_ids]
-                
-                # If any invalid, filter
-                if not np.all(is_valid):
-                    track_obs = track_obs[is_valid]
-                    n_obs = track_obs.shape[0]
-                    if n_obs < min_views:
-                        continue
-
-            tracks_list.append(track_obs)
-            track_ids.append(track_id)
-        
-        self.log(f"Creating Tracks object with {len(tracks_list)} tracks...")
+        track_ids = list(tracks_full.keys())
+        tracks_list = list(tracks_full.values())
         
         # Create Tracks container
         tracks = Tracks(num_tracks=len(tracks_list))
-        
-        # Assign directly (faster than loop if possible, but Tracks structure requires loop or specific assignment)
-        # tracks.ids is numpy array?
-        # tracks.observations is object array or list?
-        # Let's assume standard assignment for now, but vectorized if possible.
-        
-        tracks.ids[:] = np.array(track_ids)
-        # observations is likely an object array of numpy arrays
-        tracks.observations[:] = tracks_list
-        
+        for idx, (track_id, obs) in enumerate(zip(track_ids, tracks_list)):
+            tracks.ids[idx] = track_id
+            tracks.observations[idx] = obs
+            
+        self.log(f"Tracks object creation took {time.time() - start_convert:.4f} seconds.")
         return tracks
