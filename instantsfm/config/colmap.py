@@ -39,7 +39,7 @@ CONFIG = {
         'max_num_view_per_track': 200,
     },
     'GLOBAL_POSITIONER_OPTIONS': {
-        'min_num_view_per_track': 3,
+        'min_num_view_per_track': 5,
         'thres_loss_function': 1e-1,
         'max_num_iterations': 100,
         'function_tolerance': 5e-4,

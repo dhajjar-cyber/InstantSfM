@@ -3,6 +3,8 @@ import numpy as np
 import sys
 import pickle
 import os
+import datetime
+import torch
 
 from instantsfm.scene.defs import ViewGraph
 from instantsfm.controllers.config import Config
@@ -21,22 +23,22 @@ from instantsfm.processors.bundle_adjustment import TorchBA
 from instantsfm.processors.track_retriangulation import RetriangulateTracks
 from instantsfm.processors.reconstruction_pruning import PruneWeaklyConnectedImages
 
+def log(message):
+    timestamp = datetime.datetime.now().strftime("[%Y-%m-%d %H:%M:%S]")
+    print(f"{timestamp} {message}", flush=True)
+
 def save_checkpoint(path, view_graph, cameras, images, tracks=None):
     try:
-        print(f"Saving checkpoint to {path}...")
-        sys.stdout.flush()
+        log(f"Saving checkpoint to {path}...")
         with open(path, 'wb') as f:
             pickle.dump((view_graph, cameras, images, tracks), f)
-        print(f"Successfully saved checkpoint to {path}.")
-        sys.stdout.flush()
+        log(f"Successfully saved checkpoint to {path}.")
     except Exception as e:
-        print(f"Error saving checkpoint to {path}: {e}")
-        sys.stdout.flush()
+        log(f"Error saving checkpoint to {path}: {e}")
 
 def load_checkpoint(path):
     try:
-        print(f"Loading checkpoint from {path}...")
-        sys.stdout.flush()
+        log(f"Loading checkpoint from {path}...")
         with open(path, 'rb') as f:
             data = pickle.load(f)
             if len(data) == 3:
@@ -46,28 +48,26 @@ def load_checkpoint(path):
                 view_graph, cameras, images, tracks = data
             else:
                 raise ValueError("Unknown checkpoint format")
-        print(f"Successfully loaded checkpoint from {path}.")
-        sys.stdout.flush()
+        log(f"Successfully loaded checkpoint from {path}.")
         return view_graph, cameras, images, tracks
     except Exception as e:
-        print(f"Error loading checkpoint from {path}: {e}")
-        sys.stdout.flush()
+        log(f"Error loading checkpoint from {path}: {e}")
         return None, None, None, None
 
-def SolveGlobalMapper(view_graph:ViewGraph, cameras, images, config:Config, depths=None, visualizer=None):    
-    print(f"Starting Global Mapper with {len(images.ids)} images and {len(view_graph.image_pairs)} pairs.")
-    sys.stdout.flush()
+def SolveGlobalMapper(view_graph:ViewGraph, cameras, images, config:Config, depths=None, visualizer=None, tracks=None):    
+    # Set PyTorch memory configuration to avoid fragmentation
+    os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
+    
+    log(f"Starting Global Mapper with {len(images.ids)} images and {len(view_graph.image_pairs)} pairs.")
 
-    print("==> Checking for checkpoint resume...")
-    sys.stdout.flush()
+    log("==> Checking for checkpoint resume...")
     checkpoint_path = config.OPTIONS.get('checkpoint_path', None)
     resume = config.OPTIONS.get('resume_from_checkpoint', False)
-    tracks = None
+    # tracks is now passed as argument, default None
 
     if resume and checkpoint_path:
         if not os.path.exists(checkpoint_path):
-            print(f"Error: Resume requested but checkpoint not found at {checkpoint_path}")
-            sys.stdout.flush()
+            log(f"Error: Resume requested but checkpoint not found at {checkpoint_path}")
             exit(1)
 
         loaded_vg, loaded_cams, loaded_imgs, loaded_tracks = load_checkpoint(checkpoint_path)
@@ -87,16 +87,14 @@ def SolveGlobalMapper(view_graph:ViewGraph, cameras, images, config:Config, dept
                 config.OPTIONS['skip_rotation_averaging'] = True
                 config.OPTIONS['skip_track_establishment'] = True
                 
-            print(f"Resuming from checkpoint (stage: {resume_stage}), skipping completed steps.")
+            log(f"Resuming from checkpoint (stage: {resume_stage}), skipping completed steps.")
         else:
-            print("Error: Failed to load checkpoint file.")
-            sys.stdout.flush()
+            log("Error: Failed to load checkpoint file.")
             exit(1)
-        sys.stdout.flush()
 
     if not config.OPTIONS['skip_preprocessing']:
         print('-------------------------------------')
-        print('Running preprocessing ...')
+        log('Running preprocessing ...')
         print('-------------------------------------')
         sys.stdout.flush()
         start_time = time.time()
@@ -202,31 +200,70 @@ def SolveGlobalMapper(view_graph:ViewGraph, cameras, images, config:Config, dept
 
     if not config.OPTIONS['skip_global_positioning']:
         print('-------------------------------------')
-        print('Running global positioning ...')
+        log('Running global positioning ...')
         print('-------------------------------------')
         start_time = time.time()
+        
+        log("Undistorting images...")
+        start_undistort = time.time()
         UndistortImages(cameras, images)
+        log(f"Undistortion took {time.time() - start_undistort:.4f} seconds")
 
         gp_engine = TorchGP(visualizer=visualizer)
+        
+        log("Initializing random positions...")
+        start_init = time.time()
         gp_engine.InitializeRandomPositions(cameras, images, tracks, depths)
+        log(f"Initialization took {time.time() - start_init:.4f} seconds")
+        
+        log("Optimizing global positions...")
+        # Clear cache before heavy optimization
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            
+        start_opt = time.time()
         gp_engine.Optimize(cameras, images, tracks, depths, config.GLOBAL_POSITIONER_OPTIONS)
+        log(f"Optimization took {time.time() - start_opt:.4f} seconds")
+        
+        log("Filtering tracks by angle...")
+        start_filter = time.time()
         tracks = FilterTracksByAngle(cameras, images, tracks, config.INLIER_THRESHOLD_OPTIONS['max_angle_error'])
+        log(f"Filtering took {time.time() - start_filter:.4f} seconds")
+        
+        log("Normalizing reconstruction...")
         NormalizeReconstruction(images, tracks, depths)
-        print('Global positioning took: ', time.time() - start_time)
+        
+        log(f'Global positioning took: {time.time() - start_time} seconds')
 
     if not config.OPTIONS['skip_bundle_adjustment']:
         print('-------------------------------------')
-        print('Running bundle adjustment ...')
+        log('Running bundle adjustment ...')
         print('-------------------------------------')
         start_time = time.time()
         for iter in range(3):
+            log(f"Bundle Adjustment Iteration {iter+1}/3...")
             ba_engine = TorchBA(visualizer=visualizer)
-            ba_engine.Solve(cameras, images, tracks, config.BUNDLE_ADJUSTER_OPTIONS)
-            UndistortImages(cameras, images)
-            FilterTracksByReprojectionNormalized(cameras, images, tracks, config.INLIER_THRESHOLD_OPTIONS['max_reprojection_error'] * max(1, 3 - iter))
-        print(f'{np.sum(images.is_registered)} images are registered after BA.')
             
-        print('Filtering tracks')
+            log(f"  Solving BA...")
+            # Clear cache before BA
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                
+            start_ba = time.time()
+            ba_engine.Solve(cameras, images, tracks, config.BUNDLE_ADJUSTER_OPTIONS)
+            log(f"  BA Solve took {time.time() - start_ba:.4f} seconds")
+            
+            log(f"  Undistorting images...")
+            UndistortImages(cameras, images)
+            
+            log(f"  Filtering tracks by reprojection...")
+            start_filter = time.time()
+            FilterTracksByReprojectionNormalized(cameras, images, tracks, config.INLIER_THRESHOLD_OPTIONS['max_reprojection_error'] * max(1, 3 - iter))
+            log(f"  Filtering took {time.time() - start_filter:.4f} seconds")
+            
+        log(f'{np.sum(images.is_registered)} images are registered after BA.')
+            
+        log('Filtering tracks')
         UndistortImages(cameras, images)
         FilterTracksByReprojectionNormalized(cameras, images, tracks, config.INLIER_THRESHOLD_OPTIONS['max_reprojection_error'])
         FilterTracksTriangulationAngle(cameras, images, tracks, config.INLIER_THRESHOLD_OPTIONS['min_triangulation_angle'])

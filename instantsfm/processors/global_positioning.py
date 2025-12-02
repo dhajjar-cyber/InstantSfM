@@ -1,7 +1,8 @@
 import numpy as np
 import tqdm
 import sys
-
+import time
+import gc
 
 from instantsfm.utils.cost_function import pairwise_cost
 from instantsfm.scene.defs import Tracks
@@ -85,11 +86,23 @@ class TorchGP():
                 images.world2cams[image_id, :3, 3] = -(R @ t)
 
         # filter out tracks with too few observations
+        print(f"Filtering {len(tracks)} tracks by min_num_view_per_track={GLOBAL_POSITIONER_OPTIONS['min_num_view_per_track']}...", flush=True)
         valid_mask = np.array([tracks.observations[i].shape[0] >= GLOBAL_POSITIONER_OPTIONS['min_num_view_per_track'] 
                                for i in range(len(tracks))])
         
         # Filter tracks in-place to maintain reference semantics
         tracks.filter_by_mask(valid_mask)
+        print(f"Tracks remaining after filtering: {len(tracks)}", flush=True)
+
+        # Subsample if too many tracks to prevent OOM
+        max_tracks = 200000
+        if len(tracks) > max_tracks:
+            print(f"Subsampling tracks from {len(tracks)} to {max_tracks} to prevent OOM...", flush=True)
+            indices = np.random.choice(len(tracks), max_tracks, replace=False)
+            keep_mask = np.zeros(len(tracks), dtype=bool)
+            keep_mask[indices] = True
+            tracks.filter_by_mask(keep_mask)
+            print(f"Tracks remaining after subsampling: {len(tracks)}", flush=True)
         
         # filter out images that have no tracks
         image_used = np.zeros(len(images), dtype=bool)
@@ -117,46 +130,105 @@ class TorchGP():
         # Batch extract track positions
         points_3d = torch.tensor(tracks.xyzs, dtype=torch.float64, device=self.device)
 
+        print("Vectorizing track observations...", flush=True)
+        start_vec = time.time()
+        
+        # 1. Flatten observations
+        obs_lengths = np.array([len(o) for o in tracks.observations])
+        if len(tracks.observations) > 0:
+            all_obs = np.concatenate(tracks.observations)
+            all_track_ids = np.repeat(np.arange(len(tracks)), obs_lengths)
+        else:
+            all_obs = np.zeros((0, 2), dtype=np.int32)
+            all_track_ids = np.zeros(0, dtype=np.int32)
+            
+        # 2. Filter by registered images
+        valid_mask = images.is_registered[all_obs[:, 0]]
+        all_obs = all_obs[valid_mask]
+        all_track_ids = all_track_ids[valid_mask]
+        
+        # 3. Sort by image_id for grouped processing
+        sort_idx = np.argsort(all_obs[:, 0])
+        all_obs = all_obs[sort_idx]
+        all_track_ids = all_track_ids[sort_idx]
+        
+        # 4. Process by image groups
+        unique_image_ids, split_indices = np.unique(all_obs[:, 0], return_index=True)
+        split_indices = np.append(split_indices, len(all_obs))
+        
         translations_list = []
-        image_indices_list = []
-        point_indices_list = []
         depth_values_list = []
         depth_availability_list = []
-
-        for track_id in range(len(tracks)):
-            track_obs = tracks.observations[track_id]
-            for image_id, feature_id in track_obs:
-                if not images.is_registered[image_id]:
-                    continue
-                if depths is not None:
-                    # get depth as scales for optimization
-                    depth = images.depths[image_id][feature_id]
-                    available = depth
-                    depth = depth if available else 1.0 # default value
-                    depth_values_list.append(1 / depth) # use inverse depth
-                    depth_availability_list.append(available)
-                R_transpose = images.world2cams[image_id, :3, :3].T
-                feature_undist = images.features_undist[image_id][feature_id]
-                translation = R_transpose @ feature_undist
-                translations_list.append(translation)
-                image_indices_list.append(image_id2idx[image_id])
-                point_indices_list.append(track_id)
         
-        translations = torch.tensor(np.array(translations_list), dtype=torch.float64).to(self.device)
-        image_indices = torch.tensor(np.array(image_indices_list), dtype=torch.int32).to(self.device)
-        point_indices = torch.tensor(np.array(point_indices_list), dtype=torch.int32).to(self.device)
+        for i in range(len(unique_image_ids)):
+            image_id = unique_image_ids[i]
+            start_idx = split_indices[i]
+            end_idx = split_indices[i+1]
+            
+            # Get feature IDs for this image
+            feature_ids = all_obs[start_idx:end_idx, 1]
+            
+            # Vectorized translation computation
+            R = images.world2cams[image_id, :3, :3]
+            
+            # Get features (N, 2) and make homogeneous (N, 3)
+            features_2d = images.features_undist[image_id][feature_ids]
+            if features_2d.shape[1] == 2:
+                features_3d = np.column_stack([features_2d, np.ones(len(features_2d))])
+            else:
+                features_3d = features_2d
+            
+            # Compute translations: (R.T @ f.T).T = f @ R
+            translations = features_3d @ R
+            translations_list.append(translations)
+            
+            # Handle depths
+            if depths is not None:
+                img_depths = images.depths[image_id][feature_ids]
+                available = img_depths > 0
+                safe_depths = np.where(available, img_depths, 1.0)
+                inv_depths = 1.0 / safe_depths
+                depth_values_list.append(inv_depths)
+                depth_availability_list.append(available)
+
+        # Concatenate results
+        if translations_list:
+            translations_np = np.concatenate(translations_list)
+        else:
+            translations_np = np.zeros((0, 3))
+
+        # Create image indices using lookup table
+        max_img_id = len(images)
+        lookup = np.full(max_img_id, -1, dtype=np.int32)
+        lookup[registered_indices] = np.arange(len(registered_indices))
+        image_indices_np = lookup[all_obs[:, 0]]
+        
+        # Point indices are just the track IDs
+        point_indices_np = all_track_ids
+
+        print(f"Vectorization complete in {time.time() - start_vec:.4f}s. Processing {len(translations_np)} observations.", flush=True)
+
+        translations = torch.tensor(translations_np, dtype=torch.float64).to(self.device)
+        image_indices = torch.tensor(image_indices_np, dtype=torch.int32).to(self.device)
+        point_indices = torch.tensor(point_indices_np, dtype=torch.int32).to(self.device)
         is_calibrated = torch.tensor([cameras[images.cam_ids[idx]].has_prior_focal_length 
                                      for idx in registered_indices], 
                                      dtype=torch.bool, device=self.device)
         
         scale_indices = None
         if depths is None:
-            scales = torch.ones(len(translations_list), 1, dtype=torch.float64, device=self.device)
+            scales = torch.ones(len(translations), 1, dtype=torch.float64, device=self.device)
         else:
-            scales = torch.tensor(np.array(depth_values_list), dtype=torch.float64, device=self.device).unsqueeze(1)
-            depth_availability = torch.tensor(np.array(depth_availability_list), dtype=torch.bool, device=self.device).unsqueeze(1)
+            depth_values_np = np.concatenate(depth_values_list)
+            depth_availability_np = np.concatenate(depth_availability_list)
+            scales = torch.tensor(depth_values_np, dtype=torch.float64, device=self.device).unsqueeze(1)
+            depth_availability = torch.tensor(depth_availability_np, dtype=torch.bool, device=self.device).unsqueeze(1)
             # indices for optimizer to calculate loss with valid depth scale
             scale_indices = torch.where(depth_availability == 1)[0]
+
+        # Clear memory before building the graph
+        gc.collect()
+        torch.cuda.empty_cache()
 
         model = PairwiseNonBatched(image_translations, points_3d, scales, scale_indices=scale_indices)
         strategy = pp.optim.strategy.TrustRegion(radius=1e3, max=1e8, up=2.0, down=0.5**4)
@@ -173,24 +245,36 @@ class TorchGP():
 
         window_size = 4
         loss_history = []
-        progress_bar = tqdm.trange(GLOBAL_POSITIONER_OPTIONS['max_num_iterations'], file=sys.stdout)
-        for _ in progress_bar:
+        # progress_bar = tqdm.trange(GLOBAL_POSITIONER_OPTIONS['max_num_iterations'], file=sys.stdout)
+        max_iter = GLOBAL_POSITIONER_OPTIONS['max_num_iterations']
+        print(f"Starting optimization with {max_iter} iterations...", flush=True)
+        
+        for i in range(max_iter):
+            iter_start = time.time()
+            print(f"  [GP] Iteration {i+1}/{max_iter} started...", flush=True)
+            
             loss = optimizer.step(input)
-            loss_history.append(loss.item())
+            
+            iter_time = time.time() - iter_start
+            loss_val = loss.item()
+            print(f"  [GP] Iteration {i+1} completed in {iter_time:.2f}s. Loss: {loss_val:.6f}", flush=True)
+            
+            loss_history.append(loss_val)
             if len(loss_history) >= 2*window_size:
                 avg_recent = np.mean(loss_history[-window_size:])
                 avg_previous = np.mean(loss_history[-2*window_size:-window_size])
                 improvement = (avg_previous - avg_recent) / avg_previous
                 if abs(improvement) < GLOBAL_POSITIONER_OPTIONS['function_tolerance']:
+                    print(f"  [GP] Converged at iteration {i+1} (improvement {improvement:.2e} < {GLOBAL_POSITIONER_OPTIONS['function_tolerance']})", flush=True)
                     break
-            progress_bar.set_postfix({"loss": loss.item()})
+            # progress_bar.set_postfix({"loss": loss.item()})
 
             if self.visualizer:
                 update(cameras, images, tracks, points_3d, 
                        image_idx2id, image_translations)
                 self.visualizer.add_step(cameras, images, tracks, "global_positioning")
             
-        progress_bar.close()
+        # progress_bar.close()
         update(cameras, images, tracks, points_3d, 
                image_idx2id, image_translations)
 
@@ -355,6 +439,8 @@ class TorchGP():
                 image_member_indices_list.append(midx)
                 point_indices_list.append(track_id)
 
+                point_indices_list.append(track_id)
+
         translations = torch.tensor(np.array(translations_list), dtype=torch.float64, device=self.device)
         grouping_indices = torch.tensor(np.array(list(zip(image_group_indices_list, image_member_indices_list))), dtype=torch.int32, device=self.device)
         point_indices = torch.tensor(np.array(point_indices_list), dtype=torch.int32, device=self.device)
@@ -370,6 +456,10 @@ class TorchGP():
             depth_availability = torch.tensor(np.array(depth_availability_list), dtype=torch.bool, device=self.device).unsqueeze(1)
             # indices for optimizer to calculate loss with valid depth scale
             scale_indices = torch.where(depth_availability == 1)[0]
+
+        # Clear memory
+        gc.collect()
+        torch.cuda.empty_cache()
 
         model = PairwiseNonBatched(points_3d, scales, ref_trans, rel_trans, scale_indices=scale_indices)
         strategy = pp.optim.strategy.TrustRegion(radius=1e3, max=1e8, up=2.0, down=0.5**4)

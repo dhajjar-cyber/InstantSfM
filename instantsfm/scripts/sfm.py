@@ -34,6 +34,7 @@ def run_sfm():
     
     # Checkpoint loading logic
     checkpoint_loaded = False
+    tracks = None
     if mapper_args.resume and mapper_args.checkpoint_path and os.path.exists(mapper_args.checkpoint_path):
         print(f"==> Loading checkpoint from {mapper_args.checkpoint_path}...")
         sys.stdout.flush()
@@ -43,12 +44,14 @@ def run_sfm():
                 if len(data) == 3:
                     view_graph, cameras, images = data
                 elif len(data) == 4:
-                    view_graph, cameras, images, _ = data
+                    view_graph, cameras, images, tracks = data
                 else:
                     raise ValueError("Unknown checkpoint format")
             feature_name = 'colmap' # Default assumption when loading from checkpoint
             checkpoint_loaded = True
             print(f"==> Checkpoint loaded: {len(images.ids)} images, {len(view_graph.image_pairs)} pairs.")
+            if tracks is not None:
+                print(f"==> Loaded {len(tracks)} tracks from checkpoint.")
             sys.stdout.flush()
         except Exception as e:
             print(f"Failed to load checkpoint: {e}. Falling back to database read.")
@@ -107,7 +110,7 @@ def run_sfm():
         visualizer = None
     print("==> Starting Global Mapper...")
     sys.stdout.flush()
-    cameras, images, tracks = SolveGlobalMapper(view_graph, cameras, images, config, depths=depths, visualizer=visualizer)
+    cameras, images, tracks = SolveGlobalMapper(view_graph, cameras, images, config, depths=depths, visualizer=visualizer, tracks=tracks)
     print('Reconstruction done in', time.time() - start_time, 'seconds')
     WriteGlomapReconstruction(path_info.output_path, cameras, images, tracks, path_info.image_path, export_txt=mapper_args.export_txt)
     print('Reconstruction written to', path_info.output_path)
