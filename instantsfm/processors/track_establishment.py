@@ -46,7 +46,7 @@ class TrackEngine:
             if matches.shape[0] == 0:
                 continue
                 
-            if not pair.inliers or len(pair.inliers) == 0:
+            if pair.inliers is None or len(pair.inliers) == 0:
                 continue
                 
             inlier_indices = np.array(pair.inliers, dtype=int)
