@@ -98,14 +98,20 @@ class TrackEngine:
         all_dst = np.concatenate(dst_chunks)
         print(f"Concatenation took {time.time() - start_concat:.4f} seconds", flush=True)
         
-        print(f"Constructing graph with {len(all_src)} edges...")
+        print(f"Constructing graph with {len(all_src)} edges...", flush=True)
         
         # Map global IDs to 0..N indices
+        print("Mapping global IDs to indices (np.unique)...", flush=True)
+        start_unique = time.time()
         unique_ids = np.unique(np.concatenate([all_src, all_dst]))
+        print(f"Unique IDs computation took {time.time() - start_unique:.4f} seconds", flush=True)
         
         # Vectorized mapping
+        print("Computing searchsorted indices...", flush=True)
+        start_search = time.time()
         src_indices = np.searchsorted(unique_ids, all_src)
         dst_indices = np.searchsorted(unique_ids, all_dst)
+        print(f"Index mapping took {time.time() - start_search:.4f} seconds", flush=True)
         
         n_nodes = len(unique_ids)
         
@@ -113,11 +119,12 @@ class TrackEngine:
         data = np.ones(len(src_indices), dtype=bool)
         graph = coo_matrix((data, (src_indices, dst_indices)), shape=(n_nodes, n_nodes))
         
-        print("Finding connected components...")
+        print("Finding connected components...", flush=True)
+        start_cc = time.time()
         n_components, labels = connected_components(csgraph=graph, directed=False, return_labels=True)
-        print(f"Found {n_components} tracks.")
+        print(f"Found {n_components} tracks in {time.time() - start_cc:.4f} seconds.", flush=True)
         
-        print("Updating UnionFind structure...")
+        print("Updating UnionFind structure...", flush=True)
         # Find root for each component (first node in unique_ids that belongs to the component)
         _, first_indices = np.unique(labels, return_index=True)
         component_roots = unique_ids[first_indices]
