@@ -20,18 +20,21 @@ from instantsfm.processors.reconstruction_pruning import PruneWeaklyConnectedIma
 
 
 def SolveGlobalMapper(view_graph:ViewGraph, cameras, images, config:Config, depths=None, visualizer=None):    
+    print(f"Starting Global Mapper with {len(images.ids)} images and {len(view_graph.image_pairs)} pairs.")
     if not config.OPTIONS['skip_preprocessing']:
         print('-------------------------------------')
         print('Running preprocessing ...')
         print('-------------------------------------')
         start_time = time.time()
+        print('Step 1/2: UpdateImagePairsConfig...')
         UpdateImagePairsConfig(view_graph, cameras, images)
+        print('Step 2/2: DecomposeRelPose...')
         DecomposeRelPose(view_graph, cameras, images)
         print('Preprocessing took: ', time.time() - start_time)
 
     if not config.OPTIONS['skip_view_graph_calibration']:
         print('-------------------------------------')
-        print('Running view graph calibration ...')
+        print('Running view graph calibration (Ceres) ...')
         print('-------------------------------------')
         start_time = time.time()
         # vgc_engine = TorchVGC()
@@ -52,8 +55,11 @@ def SolveGlobalMapper(view_graph:ViewGraph, cameras, images, config:Config, dept
         else:
             EstimateRelativePose(view_graph, cameras, images)
         
+        print("Filtering pairs by inlier number...")
         FilterInlierNum(view_graph, config.INLIER_THRESHOLD_OPTIONS['min_inlier_num'])
+        print("Filtering pairs by inlier ratio...")
         FilterInlierRatio(view_graph, config.INLIER_THRESHOLD_OPTIONS['min_inlier_ratio'])
+        print("Keeping largest connected component...")
         view_graph.keep_largest_connected_component(images)
         print('Relative pose estimation took: ', time.time() - start_time)
 

@@ -4,6 +4,12 @@
 
 # InstantSfM: Fully Sparse and Parallel Structure-from-Motion
 
+# wget https://developer.download.nvidia.com/compute/cudss/0.7.1/local_installers/cudss-local-repo-ubuntu2404-0.7.1_0.7.1-1_amd64.deb
+# sudo dpkg -i cudss-local-repo-ubuntu2404-0.7.1_0.7.1-1_amd64.deb
+# sudo cp /var/cudss-local-repo-ubuntu2404-0.7.1/cudss-*-keyring.gpg /usr/share/keyrings/
+# sudo apt-get update
+# sudo apt-get -y install cudss
+
 
 <p align="center">  
     <a href="https://github.com/cre185/">Jiankun Zhong</a><sup>1,3*</sup>,

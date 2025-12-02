@@ -39,10 +39,12 @@ def ReadData(path) -> PathInfo:
     return path_info
 
 def ReadColmapDatabase(path):
+    print(f"Reading COLMAP database from {path}...")
     start_time = time.time()
     view_graph = ViewGraph()
     db = COLMAPDatabase.connect(path)
     
+    print("Loading images from database...")
     # Read images into temporary dict for initial processing
     # Create temporary image data structures
     images_dict = {}
@@ -61,6 +63,8 @@ def ReadColmapDatabase(path):
             'num_points3d': 0,
             'partner_ids': {}
         }
+    print(f"Loaded {len(images_dict)} images.")
+
     # group images by their folder names
     image_folders = {}
     for image_data in images_dict.values():
@@ -69,6 +73,21 @@ def ReadColmapDatabase(path):
             image_folders[folder_name] = []
         image_folders[folder_name].append(image_data)
 
+    # Sort images in each folder to ensure alignment
+    for folder_name in image_folders:
+        image_folders[folder_name].sort(key=lambda x: x['filename'])
+
+    # Find the minimum number of images across all folders to prevent IndexError
+    if image_folders:
+        min_len = min(len(folder) for folder in image_folders.values())
+        if any(len(folder) > min_len for folder in image_folders.values()):
+            print(f"Warning: Image folders have different lengths. Truncating to minimum length: {min_len}")
+            for folder_name in image_folders:
+                image_folders[folder_name] = image_folders[folder_name][:min_len]
+        else:
+            print(f"All image folders have equal length: {min_len}")
+
+    print("Loading cameras from database...")
     # Create temporary camera data structures
     camera_records = {}
     for id, model_id, width, height, params, prior_focal_length in db.execute("SELECT * FROM cameras"):
@@ -80,12 +99,16 @@ def ReadColmapDatabase(path):
             'params': blob_to_array(params, np.float64),
             'has_prior_focal_length': prior_focal_length > 0
         }
+    print(f"Loaded {len(camera_records)} cameras.")
     
+    print("Loading keypoints...")
     keypoints = [(image_id, blob_to_array(data, np.float32, (-1, cols)))
                  for image_id, cols, data in db.execute("SELECT image_id, cols, data FROM keypoints") if not data is None]
     for image_id, data in keypoints:
         images_dict[image_id]['features'] = data[:, :2]
+    print(f"Loaded keypoints for {len(keypoints)} images.")
 
+    print("Loading matches and geometries (this may take a while)...")
     query = """
     SELECT m.pair_id, m.data, t.config, t.F, t.E, t.H
     FROM matches AS m
@@ -94,11 +117,27 @@ def ReadColmapDatabase(path):
     matches_and_geometries = db.execute(query)
     image_pairs = {}
     invalid_count = 0
+    
+    # Convert cursor to list to get length for progress logging
+    matches_list = list(matches_and_geometries)
+    total_matches = len(matches_list)
+    print(f"Found {total_matches} match pairs. Processing...")
 
-    for group in matches_and_geometries:
+    rejection_reasons = {
+        'UNDEFINED': 0,
+        'DEGENERATE': 0,
+        'WATERMARK': 0,
+        'MULTIPLE': 0,
+        'DATA_NONE': 0
+    }
+
+    for idx, group in enumerate(matches_list):
+        if idx % 1000 == 0 and idx > 0:
+            print(f"Processed {idx}/{total_matches} pairs...")
         pair_id, data, config, F_blob, E_blob, H_blob = group
         if data is None:
             invalid_count += 1
+            rejection_reasons['DATA_NONE'] += 1
             continue
         data = blob_to_array(data, np.uint32, (-1, 2))
         # Convert COLMAP pair_id to image IDs
@@ -119,6 +158,7 @@ def ReadColmapDatabase(path):
         if config in [ConfigurationType.UNDEFINED, ConfigurationType.DEGENERATE, ConfigurationType.WATERMARK, ConfigurationType.MULTIPLE]:
             image_pairs[pair_key].is_valid = False
             invalid_count += 1
+            rejection_reasons[config.name] += 1
             continue
 
         F = blob_to_array(F_blob, np.float64).reshape(3, 3)
@@ -131,6 +171,7 @@ def ReadColmapDatabase(path):
 
     view_graph.image_pairs = {pair_key: image_pair for pair_key, image_pair in image_pairs.items() if image_pair.is_valid}
     print(f'Pairs read done. {invalid_count} / {len(image_pairs)+invalid_count} are invalid')
+    print(f'Rejection breakdown: {rejection_reasons}')
 
     # Convert dict to Images container with ID remapping
     camera_items = sorted(camera_records.items())
@@ -164,21 +205,47 @@ def ReadColmapDatabase(path):
     
     # Update image pair IDs to use the new sequential indices
     updated_pairs = {}
+    skipped_pairs_missing = 0
+    skipped_pairs_self = 0
     for (old_id1, old_id2), pair in view_graph.image_pairs.items():
+        if old_id1 not in img_id2idx or old_id2 not in img_id2idx:
+            skipped_pairs_missing += 1
+            continue
         new_id1 = img_id2idx[old_id1]
         new_id2 = img_id2idx[old_id2]
+        
+        # Ensure we don't create self-loops (id1 == id2)
+        if new_id1 == new_id2:
+            skipped_pairs_self += 1
+            continue
+
         pair.image_id1 = new_id1
         pair.image_id2 = new_id2
         updated_pairs[(new_id1, new_id2)] = pair
     view_graph.image_pairs = updated_pairs
+    print(f"Updated pairs: {len(updated_pairs)}. Skipped missing: {skipped_pairs_missing}, Skipped self-loops: {skipped_pairs_self}")
 
     # assign image partners here
-    first_folder = list(image_folders.values())[0]
-    for idx in range(len(first_folder)):
-        image_group = {folder_name: img_id2idx[folder[idx]['id']] for folder_name, folder in image_folders.items()}
-        for folder in image_folders.values():
-            image_idx = img_id2idx[folder[idx]['id']]
-            images.partner_ids[image_idx] = image_group
+    if image_folders:
+        first_folder = list(image_folders.values())[0]
+        # Use the truncated length (min_len) which is safe for all folders
+        safe_len = len(first_folder) 
+        
+        for idx in range(safe_len):
+            # Create group mapping: folder_name -> image_idx
+            # We must ensure the image ID actually exists in our map (it should, since we built map from same data)
+            image_group = {}
+            for folder_name, folder in image_folders.items():
+                img_id = folder[idx]['id']
+                if img_id in img_id2idx:
+                    image_group[folder_name] = img_id2idx[img_id]
+            
+            # Assign this group to every image in the group
+            for folder in image_folders.values():
+                img_id = folder[idx]['id']
+                if img_id in img_id2idx:
+                    image_idx = img_id2idx[img_id]
+                    images.partner_ids[image_idx] = image_group
 
     print(f'Reading database took: {time.time() - start_time:.2f}')
 

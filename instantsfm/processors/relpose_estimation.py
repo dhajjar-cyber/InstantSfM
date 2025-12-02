@@ -1,5 +1,6 @@
 import tqdm
 import numpy as np
+import os
 from scipy.spatial.transform import Rotation as R
 import cv2
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -79,17 +80,24 @@ def estimate_pair_relative_pose_opencv(pair, cameras, images):
     pair.E = E
     pair.inliers = inliers[np.where(mask.ravel())[0]] # inliers
 
+import sys
+
 def EstimateRelativePose(view_graph: ViewGraph, cameras, images, use_poselib=False):
     valid_pairs = [pair for pair in view_graph.image_pairs.values() if pair.is_valid]
-    progress = tqdm.tqdm(total=len(valid_pairs))
+    # Force flush to ensure logs appear immediately
+    progress = tqdm.tqdm(total=len(valid_pairs), file=sys.stdout)
+    
+    num_threads = int(os.environ.get('POSE_ESTIMATION_THREADS', 64))
+    print(f"Using {num_threads} threads for relative pose estimation.")
+    sys.stdout.flush()
 
     if use_poselib:
-        with ThreadPoolExecutor() as executor:
+        with ThreadPoolExecutor(max_workers=num_threads) as executor:
             futures = [executor.submit(estimate_pair_relative_pose_poselib, pair, cameras, images) for pair in valid_pairs]
             for future in as_completed(futures):
                 progress.update(1)
     else:
-        with ThreadPoolExecutor() as executor:
+        with ThreadPoolExecutor(max_workers=num_threads) as executor:
             futures = [executor.submit(estimate_pair_relative_pose_opencv, pair, cameras, images) for pair in valid_pairs]
             for future in as_completed(futures):
                 progress.update(1)

@@ -1085,13 +1085,68 @@ class ViewGraph:
     def find_connected_component(self):
         self.connected_component = []
         self.visited = {}
+        total_nodes = len(self.adjacency_list)
+        visited_count = 0
+        
         for image_id in self.adjacency_list.keys():
             self.visited[image_id] = False
 
+        print(f"Finding connected components for {total_nodes} nodes...")
         for image_id in self.adjacency_list.keys():
             if not self.visited[image_id]:
                 component = self.BFS(image_id)
                 self.connected_component.append(component)
+                visited_count += len(component)
+                if visited_count % 1000 == 0 or visited_count == total_nodes:
+                    print(f"BFS Progress: Visited {visited_count} / {total_nodes} nodes ({visited_count/total_nodes*100:.1f}%)")
+
+    def find_connected_component_scipy(self):
+        try:
+            from scipy.sparse import csr_matrix
+            from scipy.sparse.csgraph import connected_components
+        except ImportError:
+            print("Scipy not found. Falling back to standard BFS.")
+            self.find_connected_component()
+            return
+
+        print("Using Scipy for connected components...")
+        
+        valid_pairs = [p for p in self.image_pairs.values() if p.is_valid]
+        
+        if not valid_pairs:
+            self.connected_component = []
+            return
+
+        unique_ids = set()
+        for p in valid_pairs:
+            unique_ids.add(p.image_id1)
+            unique_ids.add(p.image_id2)
+        
+        sorted_ids = sorted(list(unique_ids))
+        id_to_idx = {uid: i for i, uid in enumerate(sorted_ids)}
+        
+        rows = []
+        cols = []
+        data = []
+        
+        for p in valid_pairs:
+            rows.append(id_to_idx[p.image_id1])
+            cols.append(id_to_idx[p.image_id2])
+            data.append(1)
+            
+        num_nodes = len(sorted_ids)
+        adj = csr_matrix((data, (rows, cols)), shape=(num_nodes, num_nodes))
+        
+        n_components, labels = connected_components(csgraph=adj, directed=False, return_labels=True)
+        
+        comps = {}
+        for i, label in enumerate(labels):
+            if label not in comps:
+                comps[label] = []
+            comps[label].append(sorted_ids[i])
+            
+        self.connected_component = list(comps.values())
+        print(f"Scipy found {len(self.connected_component)} components.")
 
     def keep_largest_connected_component(self, images: Images) -> bool:
         """Keep only the largest connected component.
@@ -1103,7 +1158,11 @@ class ViewGraph:
             True if successful, False otherwise.
         """
         self.establish_adjacency_list()
-        self.find_connected_component()
+        self.find_connected_component_scipy()
+
+        component_sizes = [len(c) for c in self.connected_component]
+        component_sizes.sort(reverse=True)
+        print(f"Found {len(self.connected_component)} connected components with sizes: {component_sizes}")
 
         max_idx = -1
         max_img = 0
@@ -1139,7 +1198,7 @@ class ViewGraph:
             Number of connected components.
         """
         self.establish_adjacency_list()
-        self.find_connected_component()
+        self.find_connected_component_scipy()
 
         cluster_num_img = []
         for comp in range(len(self.connected_component)):

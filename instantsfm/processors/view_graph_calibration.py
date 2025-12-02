@@ -28,17 +28,42 @@ def SolveViewGraphCalibration(view_graph:ViewGraph, cameras, images, VIEW_GRAPH_
     else:
         options.linear_solver_type = pyceres.LinearSolverType.SPARSE_NORMAL_CHOLESKY
     
+    single_cam_residuals = 0
+    two_cam_residuals = 0
+    added_pairs = set()
+
     for image_pair in valid_image_pairs.values():
         image1, image2 = images[image_pair.image_id1], images[image_pair.image_id2]
-        cam1, cam2 = cameras[image1.cam_id], cameras[image2.cam_id]
-        if cam1 == cam2:
+        idx1 = int(image1.cam_id)
+        idx2 = int(image2.cam_id)
+        cam1, cam2 = cameras[idx1], cameras[idx2]
+        
+        # Normalize pair order to detect duplicates (min, max)
+        pair_key = tuple(sorted((idx1, idx2)))
+        
+        # If we've already added a constraint for this pair of cameras, skip it
+        # Ceres does not allow duplicate parameter blocks in the same residual block,
+        # but it DOES allow multiple residual blocks for the same parameters.
+        # However, the error "Duplicate parameter blocks in a residual parameter" 
+        # specifically means passing [p1, p1] to a block that expects 2 distinct params.
+        
+        if idx1 == idx2:
+            # Self-loop: Single camera constraint
+            # We can have multiple constraints for the same camera if they come from different image pairs
             cost_function = FetzerFocalLengthSameCameraCostFunction(image_pair.F, cam1.principal_point)
-            idx = image1.cam_id
-            problem.add_residual_block(cost_function, loss_function, [focals[idx:idx+1]])
+            problem.add_residual_block(cost_function, loss_function, [focals[idx1:idx1+1]])
+            single_cam_residuals += 1
         else:
+            # Two camera constraint
+            # CRITICAL: Ensure we don't pass the same parameter block twice in the list
+            if idx1 == idx2:
+                print(f"CRITICAL WARNING: idx1 ({idx1}) == idx2 ({idx2}) in else branch. Skipping to avoid crash.")
+                continue
+                
             cost_function = FetzerFocalLengthCostFunction(image_pair.F, cam1.principal_point, cam2.principal_point)
-            idx1, idx2 = image1.cam_id, image2.cam_id
             problem.add_residual_block(cost_function, loss_function, [focals[idx1:idx1+1], focals[idx2:idx2+1]])
+            two_cam_residuals += 1
+    print(f"Added {single_cam_residuals} single-camera residuals and {two_cam_residuals} two-camera residuals.")
     problem.set_parameter_lower_bound(focals, 0, 1e-3)
 
     options.max_num_iterations = VIEW_GRAPH_CALIBRATOR_OPTIONS['max_num_iterations']

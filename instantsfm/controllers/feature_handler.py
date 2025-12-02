@@ -15,6 +15,17 @@ def PairId2Ids(pair_id):
 def Ids2PairId(id1, id2):
     return (id1 * C_MAX_INT + id2 if id1 < id2 else id2 * C_MAX_INT + id1)
 
+def get_image_files_recursive(image_path):
+    image_extensions = {'.jpg', '.jpeg', '.png', '.JPG', '.JPEG', '.PNG'}
+    image_files = []
+    for root, dirs, files in os.walk(image_path):
+        for file in files:
+            if os.path.splitext(file)[1] in image_extensions:
+                full_path = os.path.join(root, file)
+                rel_path = os.path.relpath(full_path, image_path)
+                image_files.append(rel_path)
+    return sorted(image_files)
+
 def GenerateDatabase(image_path, database_path, feature_handler_name, config, single_camera=False, camera_per_folder=False):
     # colmap support from command line. ensure colmap is installed
     if feature_handler_name == 'colmap':
@@ -58,7 +69,7 @@ def GenerateDatabase(image_path, database_path, feature_handler_name, config, si
         
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         start_time = time.time()
-        image_name_list = os.listdir(image_path)
+        image_name_list = get_image_files_recursive(image_path)
         image_list = [K.io.load_image(os.path.join(image_path, image_name), K.io.ImageLoadType.RGB32)[None, ...] for image_name in image_name_list]
         images = torch.cat(image_list, dim=0).to(torch.float16).to(device)
         if config.OPTIONS['uniform_camera']:
@@ -170,7 +181,7 @@ def GenerateDatabase(image_path, database_path, feature_handler_name, config, si
         
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         start_time = time.time()
-        image_name_list = os.listdir(image_path)
+        image_name_list = get_image_files_recursive(image_path)
         image_list = [K.io.load_image(os.path.join(image_path, image_name), K.io.ImageLoadType.RGB32)[None, ...] for image_name in image_name_list]
         images = torch.cat(image_list, dim=0).to(device)
         # this method assumes all images have the same size
@@ -228,7 +239,7 @@ def GenerateDatabase(image_path, database_path, feature_handler_name, config, si
         
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         start_time = time.time()
-        image_name_list = os.listdir(image_path)
+        image_name_list = get_image_files_recursive(image_path)
         image_list = [K.io.load_image(os.path.join(image_path, image_name), K.io.ImageLoadType.RGB32)[None, ...] for image_name in image_name_list]
         images = torch.cat(image_list, dim=0).to(device)
         images = K.color.rgb_to_grayscale(images)
