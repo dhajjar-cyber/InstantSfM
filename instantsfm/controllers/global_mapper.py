@@ -21,12 +21,12 @@ from instantsfm.processors.bundle_adjustment import TorchBA
 from instantsfm.processors.track_retriangulation import RetriangulateTracks
 from instantsfm.processors.reconstruction_pruning import PruneWeaklyConnectedImages
 
-def save_checkpoint(path, view_graph, cameras, images):
+def save_checkpoint(path, view_graph, cameras, images, tracks=None):
     try:
         print(f"Saving checkpoint to {path}...")
         sys.stdout.flush()
         with open(path, 'wb') as f:
-            pickle.dump((view_graph, cameras, images), f)
+            pickle.dump((view_graph, cameras, images, tracks), f)
         print(f"Successfully saved checkpoint to {path}.")
         sys.stdout.flush()
     except Exception as e:
@@ -38,14 +38,21 @@ def load_checkpoint(path):
         print(f"Loading checkpoint from {path}...")
         sys.stdout.flush()
         with open(path, 'rb') as f:
-            view_graph, cameras, images = pickle.load(f)
+            data = pickle.load(f)
+            if len(data) == 3:
+                view_graph, cameras, images = data
+                tracks = None
+            elif len(data) == 4:
+                view_graph, cameras, images, tracks = data
+            else:
+                raise ValueError("Unknown checkpoint format")
         print(f"Successfully loaded checkpoint from {path}.")
         sys.stdout.flush()
-        return view_graph, cameras, images
+        return view_graph, cameras, images, tracks
     except Exception as e:
         print(f"Error loading checkpoint from {path}: {e}")
         sys.stdout.flush()
-        return None, None, None
+        return None, None, None, None
 
 def SolveGlobalMapper(view_graph:ViewGraph, cameras, images, config:Config, depths=None, visualizer=None):    
     print(f"Starting Global Mapper with {len(images.ids)} images and {len(view_graph.image_pairs)} pairs.")
@@ -53,20 +60,36 @@ def SolveGlobalMapper(view_graph:ViewGraph, cameras, images, config:Config, dept
 
     checkpoint_path = config.OPTIONS.get('checkpoint_path', None)
     resume = config.OPTIONS.get('resume_from_checkpoint', False)
+    tracks = None
 
-    if resume and checkpoint_path and os.path.exists(checkpoint_path):
-        loaded_vg, loaded_cams, loaded_imgs = load_checkpoint(checkpoint_path)
+    if resume and checkpoint_path:
+        if not os.path.exists(checkpoint_path):
+            print(f"Error: Resume requested but checkpoint not found at {checkpoint_path}")
+            sys.stdout.flush()
+            exit(1)
+
+        loaded_vg, loaded_cams, loaded_imgs, loaded_tracks = load_checkpoint(checkpoint_path)
         if loaded_vg is not None:
             view_graph, cameras, images = loaded_vg, loaded_cams, loaded_imgs
+            if loaded_tracks is not None:
+                tracks = loaded_tracks
+            
             config.OPTIONS['skip_preprocessing'] = True
             config.OPTIONS['skip_view_graph_calibration'] = True
             config.OPTIONS['skip_relative_pose_estimation'] = True
-            print("Resuming from checkpoint, skipping preprocessing and relative pose estimation.")
+            
+            resume_stage = config.OPTIONS.get('resume_stage', 'relpose')
+            if resume_stage == 'rotation':
+                config.OPTIONS['skip_rotation_averaging'] = True
+            elif resume_stage == 'tracks':
+                config.OPTIONS['skip_rotation_averaging'] = True
+                config.OPTIONS['skip_track_establishment'] = True
+                
+            print(f"Resuming from checkpoint (stage: {resume_stage}), skipping completed steps.")
         else:
-            print("Failed to load checkpoint. Proceeding with full pipeline.")
-        sys.stdout.flush()
-    elif resume and checkpoint_path:
-        print(f"Checkpoint not found at {checkpoint_path}. Proceeding with full pipeline.")
+            print("Error: Failed to load checkpoint file.")
+            sys.stdout.flush()
+            exit(1)
         sys.stdout.flush()
 
     if not config.OPTIONS['skip_preprocessing']:
@@ -151,6 +174,10 @@ def SolveGlobalMapper(view_graph:ViewGraph, cameras, images, config:Config, dept
         print('Rotation averaging took: ', time.time() - start_time)
         sys.stdout.flush()
 
+        save_rot_path = config.OPTIONS.get('save_rotation_checkpoint_path')
+        if save_rot_path:
+             save_checkpoint(save_rot_path, view_graph, cameras, images)
+
     if not config.OPTIONS['skip_track_establishment']:
         print('-------------------------------------')
         print('Running track establishment ...')
@@ -166,6 +193,10 @@ def SolveGlobalMapper(view_graph:ViewGraph, cameras, images, config:Config, dept
         print('Before filtering:', len(tracks_orig), ', after filtering:', len(tracks))
         print('Track establishment took: ', time.time() - start_time)
         sys.stdout.flush()
+
+        save_tracks_path = config.OPTIONS.get('save_tracks_checkpoint_path')
+        if save_tracks_path:
+             save_checkpoint(save_tracks_path, view_graph, cameras, images, tracks)
 
     if not config.OPTIONS['skip_global_positioning']:
         print('-------------------------------------')

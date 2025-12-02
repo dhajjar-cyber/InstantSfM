@@ -21,6 +21,9 @@ def run_sfm():
     parser.add_argument('--manual_config_name', help='Name of the manual configuration file')
     parser.add_argument('--resume', action='store_true', help='Resume from checkpoint if available')
     parser.add_argument('--checkpoint_path', help='Path to the checkpoint file')
+    parser.add_argument('--save_rotation_checkpoint_path', help='Path to save checkpoint after rotation averaging')
+    parser.add_argument('--save_tracks_checkpoint_path', help='Path to save checkpoint after track establishment')
+    parser.add_argument('--resume_stage', default='relpose', choices=['relpose', 'rotation', 'tracks'], help='Stage to resume from (relpose, rotation, or tracks)')
     mapper_args = parser.parse_args()
 
     path_info = ReadData(mapper_args.data_path)
@@ -64,12 +67,20 @@ def run_sfm():
     # If we loaded checkpoint externally, we don't want global_mapper to load it again
     config.OPTIONS['resume_from_checkpoint'] = False if checkpoint_loaded else mapper_args.resume
     config.OPTIONS['checkpoint_path'] = mapper_args.checkpoint_path
+    config.OPTIONS['save_rotation_checkpoint_path'] = mapper_args.save_rotation_checkpoint_path
+    config.OPTIONS['save_tracks_checkpoint_path'] = mapper_args.save_tracks_checkpoint_path
+    config.OPTIONS['resume_stage'] = mapper_args.resume_stage
     
     # If checkpoint was loaded here, set skip flags
     if checkpoint_loaded:
         config.OPTIONS['skip_preprocessing'] = True
         config.OPTIONS['skip_view_graph_calibration'] = True
         config.OPTIONS['skip_relative_pose_estimation'] = True
+        if mapper_args.resume_stage == 'rotation':
+            config.OPTIONS['skip_rotation_averaging'] = True
+        elif mapper_args.resume_stage == 'tracks':
+            config.OPTIONS['skip_rotation_averaging'] = True
+            config.OPTIONS['skip_track_establishment'] = True
 
     if mapper_args.enable_gui or mapper_args.record_recon:
         visualizer = ReconstructionVisualizer(save_data=mapper_args.record_recon, 

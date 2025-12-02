@@ -14,6 +14,7 @@ class TrackEngine:
         self.view_graph = view_graph
         self.images = images
         self.uf = UnionFind()
+        self.node_counts = {}
 
     def EstablishFullTracks(self, TRACK_ESTABLISHMENT_OPTIONS):
         import time
@@ -21,7 +22,8 @@ class TrackEngine:
         # self.BlindConcatenation()
         self.BlindConcatenationOptimized()
         print(f"Blind concatenation took {time.time() - start_time} seconds")
-        tracks = self.TrackCollection(TRACK_ESTABLISHMENT_OPTIONS)
+        # tracks = self.TrackCollection(TRACK_ESTABLISHMENT_OPTIONS)
+        tracks = self.TrackCollectionOptimized(TRACK_ESTABLISHMENT_OPTIONS)
         print(f"Track collection took {time.time() - start_time} seconds")
         return tracks
 
@@ -102,6 +104,12 @@ class TrackEngine:
         
         print("UnionFind update complete.")
 
+        # Store node counts for TrackCollection
+        print("Computing node counts...")
+        all_nodes = np.concatenate([all_src, all_dst])
+        unique_nodes, counts = np.unique(all_nodes, return_counts=True)
+        self.node_counts = dict(zip(unique_nodes, counts))
+
     def BlindConcatenation(self):
         for pair in tqdm.tqdm(self.view_graph.image_pairs.values(), desc="Blind Concatenation", file=sys.stdout):
             if not pair.is_valid:
@@ -118,6 +126,52 @@ class TrackEngine:
                 else:
                     self.uf.Union(point_global_id2, point_global_id1)
     
+    def TrackCollectionOptimized(self, TRACK_ESTABLISHMENT_OPTIONS):
+        print("Constructing tracks from UnionFind...")
+        # Group nodes by track_id
+        tracks_map = defaultdict(list)
+        for node_id, root_id in self.uf.parent.items():
+            count = self.node_counts.get(node_id, 0)
+            tracks_map[root_id].append((node_id, count))
+            
+        tracks_dict = {}
+        for track_id, nodes in tqdm.tqdm(tracks_map.items(), desc="Building Tracks", file=sys.stdout):
+            obs_list = []
+            for node_id, count in nodes:
+                image_id = int(node_id >> 32)
+                feature_id = int(node_id & 0xFFFFFFFF)
+                obs_list.append([image_id, feature_id, -count])
+            tracks_dict[track_id] = np.array(obs_list)
+
+        discarded_counter = 0
+        for track_id in tqdm.tqdm(list(tracks_dict.keys()), desc="Track Filtering", file=sys.stdout):
+            # verify consistency of observations
+            image_id_set = {}
+            for image_id, feature_id, _ in tracks_dict[track_id]:
+                image_feature = self.images[image_id].features[feature_id]
+                if image_id not in image_id_set:
+                    image_id_set[image_id] = image_feature.reshape(1, 2)
+                else:
+                    features_array = image_id_set[image_id]
+                    distances = np.linalg.norm(features_array - image_feature, axis=1)
+                    if np.any(distances > TRACK_ESTABLISHMENT_OPTIONS['thres_inconsistency']):
+                        del tracks_dict[track_id]
+                        discarded_counter += 1
+                        break
+                    image_id_set[image_id] = np.vstack([features_array, image_feature.reshape(1, 2)])
+            if track_id not in tracks_dict:
+                continue
+            
+            # filter out multiple observations in the same image
+            correspondences = tracks_dict[track_id]
+            sort_by_prio, unique_indices = np.unique(correspondences[:, [0, 2]], axis=0, return_index=True)
+            unique_image_ids, unique_indices_ = np.unique(sort_by_prio[:, 0], return_index=True)
+            discarded_counter += len(correspondences) - len(unique_indices_)
+            tracks_dict[track_id] = correspondences[unique_indices[unique_indices_], :2]
+
+        print(f"Discarded {discarded_counter} features due to deduplication")
+        return tracks_dict
+
     def TrackCollection(self, TRACK_ESTABLISHMENT_OPTIONS):
         track_map = {}
         for pair in tqdm.tqdm(self.view_graph.image_pairs.values(), desc="Track Collection", file=sys.stdout):
@@ -174,17 +228,20 @@ class TrackEngine:
             if not self.images.is_registered[image_id]:
                 continue
             tracks_per_camera[image_id] = 0
+        
+        valid_cameras = np.array(list(tracks_per_camera.keys()))
+        
         # if input image resolution is too low, TRACK_ESTABLISHMENT_OPTIONS['min_num_view_per_track'] is suggested to be small, e.g. 1 or 2.... to make sure all image indices are included
         # TRACK_ESTABLISHMENT_OPTIONS['min_num_view_per_track'] = 2
         tracks_list = []
         track_ids = []
-        for track_id, track_obs in tracks_full.items():
+        for track_id, track_obs in tqdm.tqdm(tracks_full.items(), desc="Filtering Tracks for Problem", file=sys.stdout):
             if track_obs.shape[0] < TRACK_ESTABLISHMENT_OPTIONS['min_num_view_per_track']:
                 continue
             if track_obs.shape[0] > TRACK_ESTABLISHMENT_OPTIONS['max_num_view_per_track']:
                 continue
             track_obs = tracks_full[track_id]
-            filtered_obs = track_obs[np.isin(track_obs[:, 0], list(tracks_per_camera.keys()))]
+            filtered_obs = track_obs[np.isin(track_obs[:, 0], valid_cameras)]
             tracks_list.append(filtered_obs)
             track_ids.append(track_id)
         
