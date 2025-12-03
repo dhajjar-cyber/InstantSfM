@@ -95,7 +95,7 @@ class TorchGP():
         print(f"Tracks remaining after filtering: {len(tracks)}", flush=True)
 
         # Subsample if too many tracks to prevent OOM
-        max_tracks = 200000
+        max_tracks = GLOBAL_POSITIONER_OPTIONS.get('max_tracks_for_gp', 200000)
         if len(tracks) > max_tracks:
             print(f"Subsampling tracks from {len(tracks)} to {max_tracks} to prevent OOM...", flush=True)
             indices = np.random.choice(len(tracks), max_tracks, replace=False)

@@ -40,6 +40,7 @@ CONFIG = {
     },
     'GLOBAL_POSITIONER_OPTIONS': {
         'min_num_view_per_track': 5,
+        'max_tracks_for_gp': 200000,
         'thres_loss_function': 1e-1,
         'max_num_iterations': 100,
         'function_tolerance': 5e-4,
