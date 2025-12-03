@@ -25,6 +25,7 @@ def run_sfm():
     parser.add_argument('--save_rotation_checkpoint_path', help='Path to save checkpoint after rotation averaging')
     parser.add_argument('--save_tracks_checkpoint_path', help='Path to save checkpoint after track establishment')
     parser.add_argument('--resume_stage', default='relpose', choices=['relpose', 'rotation', 'tracks'], help='Stage to resume from (relpose, rotation, or tracks)')
+    parser.add_argument('--max_tracks_for_gp', type=int, default=200000, help='Maximum number of tracks to use for global positioning (subsampling)')
     mapper_args = parser.parse_args()
 
     path_info = ReadData(mapper_args.data_path)

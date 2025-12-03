@@ -40,10 +40,11 @@ CONFIG = {
     },
     'GLOBAL_POSITIONER_OPTIONS': {
         'min_num_view_per_track': 5,
-        'max_tracks_for_gp': 200000,
+        'max_tracks_for_gp': 500000,
         'thres_loss_function': 1e-1,
         'max_num_iterations': 100,
         'function_tolerance': 5e-4,
+        'enforce_zero_baseline': True, # Enforce zero translation between rig cameras
     },
     'BUNDLE_ADJUSTER_OPTIONS': {
         'optimize_poses': True,
@@ -52,6 +53,7 @@ CONFIG = {
         'thres_loss_function': 1.,
         'max_num_iterations': 200,
         'function_tolerance': 5e-4,
+        'enforce_zero_baseline': True, # Enforce zero translation between rig cameras
     },
     'TRIANGULATOR_OPTIONS': {
         'min_num_view_per_track': 2,

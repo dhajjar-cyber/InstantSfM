@@ -392,6 +392,11 @@ class TorchGP():
         group_refs_init = []
         # rel_trans per column
         rel_accum = [[] for _ in range(num_columns)]
+        
+        enforce_zero_baseline = GLOBAL_POSITIONER_OPTIONS.get('enforce_zero_baseline', False)
+        if enforce_zero_baseline:
+            print("Enforcing zero baseline (translation) for rig cameras.")
+            
         for rid in range(num_groups):
             imgs = row_images[rid]
             ref_img_id = imgs[0]
@@ -400,8 +405,14 @@ class TorchGP():
             # per-column relative
             for cidx in range(num_columns):
                 img_id = imgs[cidx]
-                t = images.world2cams[img_id, :3, 3] - ref_trans
-                rel_accum[cidx].append(t)
+                if enforce_zero_baseline:
+                    # Force relative translation to be zero
+                    rel_accum[cidx].append(np.zeros(3))
+                else:
+                    # Calculate actual relative translation
+                    # T_rel = T_img - T_ref (approximate initialization)
+                    rel = images.world2cams[img_id, :3, 3] - ref_trans
+                    rel_accum[cidx].append(rel)
         # average per-column across groups (if no data, zeros)
         rel_trans_init = np.zeros((num_columns, 3), dtype=np.float64)
         for cidx in range(num_columns):

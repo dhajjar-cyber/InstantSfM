@@ -11,7 +11,7 @@ GENERAL_OPTIONS = {
     'skip_global_positioning': False,
     'skip_bundle_adjustment': False,
     'num_iteration_bundle_adjustment': 3,
-    'skip_retriangulation': True,
+    'skip_retriangulation': False,
     'num_iteration_retriangulation': 1,
     'skip_pruning': True,
     # used in feature handling

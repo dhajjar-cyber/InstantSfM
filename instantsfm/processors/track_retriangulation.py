@@ -45,7 +45,9 @@ def complete_tracks(cameras, images, tracks, tracks_orig, TRIANGULATOR_OPTIONS):
     track_id2idx = {track_id: idx for idx, track_id in enumerate(tracks.keys())}
     track_idx2id = {idx: track_id for idx, track_id in enumerate(tracks.keys())}
 
-    for track_id, track_obs in tracks_orig.items():
+    from tqdm import tqdm
+    print("Building candidate observations for retriangulation...")
+    for track_id, track_obs in tqdm(tracks_orig.items(), desc="Processing tracks"):
         if track_id not in track_id2idx:
             continue
 
@@ -258,7 +260,7 @@ def RetriangulateTracks(cameras, images, tracks, tracks_orig, TRIANGULATOR_OPTIO
         ba_engine = TorchBA()
         LOCAL_BUNDLE_ADJUSTER_OPTIONS = BUNDLE_ADJUSTER_OPTIONS.copy()
         LOCAL_BUNDLE_ADJUSTER_OPTIONS['optimize_poses'] = False
-        ba_engine.Solve(cameras, images, tracks, LOCAL_BUNDLE_ADJUSTER_OPTIONS)
+        ba_engine.Solve(cameras, images, tracks, LOCAL_BUNDLE_ADJUSTER_OPTIONS, single_only=False)
         num_changed_observations = 0
         num_changed_observations += abs(complete_and_merge_tracks(cameras, images, tracks, tracks_orig, TRIANGULATOR_OPTIONS))
         num_changed_observations += filter_points(cameras, images, tracks, TRIANGULATOR_OPTIONS)

@@ -24,9 +24,16 @@ class TorchBA():
     def Solve(self, cameras, images, tracks, BUNDLE_ADJUSTER_OPTIONS, single_only=True):
         # use an arbitrary image to determine if multi-folder optimization is needed
         is_multi = len(images.partner_ids[0]) > 1
+        
+        enforce_zero_baseline = BUNDLE_ADJUSTER_OPTIONS.get('enforce_zero_baseline', False)
+        
         if is_multi and not single_only:
             self.SolveMulti(cameras, images, tracks, BUNDLE_ADJUSTER_OPTIONS)
         else:
+            if enforce_zero_baseline:
+                print("WARNING: enforce_zero_baseline is True, but falling back to single-camera BA.")
+                print(f"         is_multi={is_multi}, single_only={single_only}")
+                print("         Rig constraints will be IGNORED.")
             self.SolveSingle(cameras, images, tracks, BUNDLE_ADJUSTER_OPTIONS)
 
     def SolveSingle(self, cameras, images, tracks, BUNDLE_ADJUSTER_OPTIONS):
@@ -257,56 +264,115 @@ class TorchBA():
         # Build grouping (rows and columns) from partner_ids if available, similar to global_positioning
         registered_indices = images.get_registered_indices()
         partner_dicts = [images.partner_ids[idx] for idx in registered_indices]
-        folder_keys = sorted(list(partner_dicts[0].keys()))
+        
+        # 1. Find all unique folder keys across all registered images
+        all_keys = set()
+        for d in partner_dicts:
+            all_keys.update(d.keys())
+        folder_keys = sorted(list(all_keys))
+        folder_key_to_idx = {k: i for i, k in enumerate(folder_keys)}
 
-        # build rows: key by tuple of image ids in folder_keys order (unique per-row)
-        rows = {}  # row_key(tuple of ids) -> gid
-        row_images = {}  # gid -> list of image ids per column order
-        image_group_idx = {}
-        image_member_idx = {}
+        # 2. Group images into rows (Rig Poses)
+        rows = {}  # row_key (tuple of sorted image IDs) -> gid
+        row_dicts = {} # gid -> partner_dict
         gid = 0
+        
         registered_mask = images.get_registered_mask()
         for image_id in range(len(images)):
             if not registered_mask[image_id]:
                 continue
             partner_dict = images.partner_ids[image_id]
-            row_key = tuple(int(partner_dict[k]) for k in folder_keys)
+            # Unique key for this group of images
+            row_key = tuple(sorted(partner_dict.values()))
 
             if row_key not in rows:
                 rows[row_key] = gid
-                row_images[gid] = [int(v) for v in row_key]
+                row_dicts[gid] = partner_dict
                 gid += 1
 
-        # now fill image -> (gid, column_idx) mapping
-        for rk, gid in rows.items():
-            imgs = row_images[gid]
-            for cidx, img_id in enumerate(imgs):
+        # 3. Map each image to (gid, column_idx)
+        image_group_idx = {}
+        image_member_idx = {}
+        
+        for gid, p_dict in row_dicts.items():
+            for folder, img_id in p_dict.items():
+                if img_id in image_group_idx: continue # Already processed
+                
+                col_idx = folder_key_to_idx[folder]
                 image_group_idx[img_id] = gid
-                image_member_idx[img_id] = cidx
+                image_member_idx[img_id] = col_idx
 
-        num_groups = len(row_images)
+        num_groups = len(rows)
         num_columns = len(folder_keys)
 
-        # initialize group SE3 poses and per-column relative poses
-        group_pose_init = []
-        rel_accum = [[] for _ in range(num_columns)]
-        for rid in range(num_groups):
-            imgs = row_images[rid]
-            ref_img_id = imgs[0]
-            ref_mat = images.world2cams[ref_img_id]
-            ref_pose = pp.mat2SE3(ref_mat)
-            group_pose_init.append(ref_pose.tensor())
-            for cidx in range(num_columns):
-                img_id = imgs[cidx]
-                # ref_pose*rel_pose = real_pose
-                rel_pose = ref_pose.Inv() * pp.mat2SE3(images.world2cams[img_id])
-                rel_accum[cidx].append(rel_pose.tensor())
+        # 4. Initialize Poses
+        enforce_zero_baseline = BUNDLE_ADJUSTER_OPTIONS.get('enforce_zero_baseline', False)
+        if enforce_zero_baseline:
+            print("Enforcing zero baseline (translation) for rig cameras in BA.")
 
-        # as the relative pose will be optimized, select an arbitrary reference
-        rel_poses_init = [rel_accum[cidx][0] for cidx in range(num_columns)]
+        # Initialize Relative Poses (T_rig_cam)
+        # We define the Rig Frame to be aligned with folder_keys[0] (Column 0).
+        rel_poses_init = [None] * num_columns
+        # Identity for the reference camera
+        rel_poses_init[0] = torch.tensor([0, 0, 0, 0, 0, 0, 1], dtype=torch.float64, device=self.device) 
+        
+        ref_key = folder_keys[0]
+        
+        for c in range(1, num_columns):
+            target_key = folder_keys[c]
+            deltas = []
+            
+            for rid in range(num_groups):
+                p_dict = row_dicts[rid]
+                if ref_key in p_dict and target_key in p_dict:
+                    id_ref = p_dict[ref_key]
+                    id_tgt = p_dict[target_key]
+                    
+                    pose_ref = pp.mat2SE3(images.world2cams[id_ref])
+                    pose_tgt = pp.mat2SE3(images.world2cams[id_tgt])
+                    
+                    # T_rig_tgt = T_w_ref^-1 * T_w_tgt (since T_w_ref = T_w_rig)
+                    delta = pose_ref.Inv() * pose_tgt
+                    
+                    if enforce_zero_baseline:
+                         # Zero out translation
+                        d_tensor = delta.tensor()
+                        d_tensor[..., :3] = 0
+                        deltas.append(d_tensor)
+                    else:
+                        deltas.append(delta.tensor())
+            
+            if deltas:
+                rel_poses_init[c] = deltas[0]
+            else:
+                print(f"WARNING: No overlap found between {ref_key} and {target_key}. Initializing to Identity.")
+                rel_poses_init[c] = torch.tensor([0, 0, 0, 0, 0, 0, 1], dtype=torch.float64, device=self.device)
+
+        rel_poses = torch.stack(rel_poses_init).to(self.device).to(torch.float64)
+
+        # Initialize Group Poses (T_w_rig)
+        group_pose_init = []
+        for rid in range(num_groups):
+            p_dict = row_dicts[rid]
+            
+            # Find any present camera to infer rig pose
+            found = False
+            for c, key in enumerate(folder_keys):
+                if key in p_dict:
+                    img_id = p_dict[key]
+                    pose_cam = pp.mat2SE3(images.world2cams[img_id]) # T_w_cam
+                    rel_pose = pp.SE3(rel_poses[c]) # T_rig_cam
+                    
+                    # T_w_rig = T_w_cam * T_rig_cam^-1
+                    pose_rig = pose_cam * rel_pose.Inv()
+                    group_pose_init.append(pose_rig.tensor())
+                    found = True
+                    break
+            
+            if not found:
+                group_pose_init.append(torch.tensor([0, 0, 0, 0, 0, 0, 1], dtype=torch.float64, device=self.device))
 
         ref_poses = torch.stack(group_pose_init, dim=0).to(self.device).to(torch.float64)
-        rel_poses = torch.tensor(np.array(rel_poses_init), dtype=torch.float64, device=self.device)
 
         # Build camera intrinsics
         camera_intrs_list = []

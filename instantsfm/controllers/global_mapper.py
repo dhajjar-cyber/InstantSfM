@@ -238,6 +238,8 @@ def SolveGlobalMapper(view_graph:ViewGraph, cameras, images, config:Config, dept
     if not config.OPTIONS['skip_bundle_adjustment']:
         print('-------------------------------------')
         log('Running bundle adjustment ...')
+        if config.BUNDLE_ADJUSTER_OPTIONS.get('enforce_zero_baseline', False):
+             log("Rig constraint (zero baseline) is ENABLED.")
         print('-------------------------------------')
         start_time = time.time()
         for iter in range(3):
@@ -250,7 +252,7 @@ def SolveGlobalMapper(view_graph:ViewGraph, cameras, images, config:Config, dept
                 torch.cuda.empty_cache()
                 
             start_ba = time.time()
-            ba_engine.Solve(cameras, images, tracks, config.BUNDLE_ADJUSTER_OPTIONS)
+            ba_engine.Solve(cameras, images, tracks, config.BUNDLE_ADJUSTER_OPTIONS, single_only=False)
             log(f"  BA Solve took {time.time() - start_ba:.4f} seconds")
             
             log(f"  Undistorting images...")
@@ -272,23 +274,23 @@ def SolveGlobalMapper(view_graph:ViewGraph, cameras, images, config:Config, dept
 
     if not config.OPTIONS['skip_retriangulation']:
         print('-------------------------------------')
-        print('Running retriangulation ...')
+        log('Running retriangulation ...')
         print('-------------------------------------')
         start_time = time.time()
         RetriangulateTracks(cameras, images, tracks, tracks_orig, config.TRIANGULATOR_OPTIONS, config.BUNDLE_ADJUSTER_OPTIONS)
 
         print('-------------------------------------')
-        print('Running bundle adjustment ...')
+        log('Running bundle adjustment ...')
         print('-------------------------------------')
         ba_engine = TorchBA()
-        ba_engine.Solve(cameras, images, tracks, config.BUNDLE_ADJUSTER_OPTIONS)
+        ba_engine.Solve(cameras, images, tracks, config.BUNDLE_ADJUSTER_OPTIONS, single_only=False)
 
         # NormalizeReconstruction(images, tracks)
         UndistortImages(cameras, images)
-        print('Filtering tracks')
+        log('Filtering tracks')
         FilterTracksByReprojectionNormalized(cameras, images, tracks, config.INLIER_THRESHOLD_OPTIONS['max_reprojection_error'])
         FilterTracksTriangulationAngle(cameras, images, tracks, config.INLIER_THRESHOLD_OPTIONS['min_triangulation_angle'])
-        print('Retriangulation took: ', time.time() - start_time)
+        log(f'Retriangulation took: {time.time() - start_time:.4f} seconds')
 
     if not config.OPTIONS['skip_pruning']:
         print('-------------------------------------')

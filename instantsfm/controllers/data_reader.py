@@ -148,13 +148,10 @@ def ReadColmapDatabase(path):
 
     # Find the minimum number of images across all folders to prevent IndexError
     if image_folders:
-        min_len = min(len(folder) for folder in image_folders.values())
-        if any(len(folder) > min_len for folder in image_folders.values()):
-            print(f"Warning: Image folders have different lengths. Truncating to minimum length: {min_len}")
-            for folder_name in image_folders:
-                image_folders[folder_name] = image_folders[folder_name][:min_len]
-        else:
-            print(f"All image folders have equal length: {min_len}")
+        # Do not truncate folders. We will handle alignment by frame number later.
+        print(f"Found {len(image_folders)} image folders.")
+        for folder_name, folder in image_folders.items():
+            print(f"  Folder {folder_name}: {len(folder)} images")
 
     print("Loading cameras from database...")
     # Create temporary camera data structures
@@ -287,25 +284,38 @@ def ReadColmapDatabase(path):
 
     # assign image partners here
     if image_folders:
-        first_folder = list(image_folders.values())[0]
-        # Use the truncated length (min_len) which is safe for all folders
-        safe_len = len(first_folder) 
+        import re
+        print("Grouping images by frame number for rig constraints...")
+        frame_groups = {} # frame_num -> {folder_name: image_idx}
         
-        for idx in range(safe_len):
-            # Create group mapping: folder_name -> image_idx
-            # We must ensure the image ID actually exists in our map (it should, since we built map from same data)
-            image_group = {}
-            for folder_name, folder in image_folders.items():
-                img_id = folder[idx]['id']
-                if img_id in img_id2idx:
-                    image_group[folder_name] = img_id2idx[img_id]
-            
-            # Assign this group to every image in the group
-            for folder in image_folders.values():
-                img_id = folder[idx]['id']
-                if img_id in img_id2idx:
-                    image_idx = img_id2idx[img_id]
-                    images.partner_ids[image_idx] = image_group
+        for folder_name, folder_images in image_folders.items():
+            for img_data in folder_images:
+                img_id = img_data['id']
+                filename = img_data['filename']
+                
+                if img_id not in img_id2idx:
+                    continue
+                    
+                image_idx = img_id2idx[img_id]
+                
+                # Try to parse frame number
+                # Assuming format like ..._f001234.jpg or similar
+                match = re.search(r'f(\d+)', filename)
+                if match:
+                    frame_num = int(match.group(1))
+                    if frame_num not in frame_groups:
+                        frame_groups[frame_num] = {}
+                    frame_groups[frame_num][folder_name] = image_idx
+        
+        print(f"Found {len(frame_groups)} unique frames across {len(image_folders)} folders.")
+        
+        # Assign partners
+        assigned_count = 0
+        for frame_num, group in frame_groups.items():
+            for folder_name, image_idx in group.items():
+                images.partner_ids[image_idx] = group
+                assigned_count += 1
+        print(f"Assigned partner groups to {assigned_count} images.")
 
     print(f'Reading database took: {time.time() - start_time:.2f}')
 
