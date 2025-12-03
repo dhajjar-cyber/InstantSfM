@@ -45,7 +45,16 @@ class TrackEngine:
         self.log("Collecting matches for graph construction...")
         # Pre-allocate or collect in list
         for pair in tqdm.tqdm(self.view_graph.image_pairs.values(), desc="Blind Concatenation (Optimized)", file=sys.stdout):
-            if not pair.is_valid:
+            # Robust check for is_valid (handle case where it might be an array)
+            is_valid = pair.is_valid
+            if isinstance(is_valid, np.ndarray):
+                if is_valid.size > 1:
+                    # Ambiguous array, treat as False (invalid)
+                    is_valid = False
+                else:
+                    is_valid = bool(is_valid)
+            
+            if not is_valid:
                 continue
             
             if not hasattr(pair, 'matches') or pair.matches is None:
