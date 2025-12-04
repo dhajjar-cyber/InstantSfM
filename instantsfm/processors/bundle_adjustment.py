@@ -21,7 +21,7 @@ class TorchBA():
         self.device = device
         self.visualizer = visualizer
 
-    def Solve(self, cameras, images, tracks, BUNDLE_ADJUSTER_OPTIONS, single_only=True):
+    def Solve(self, cameras, images, tracks, BUNDLE_ADJUSTER_OPTIONS, single_only=False):
         # use an arbitrary image to determine if multi-folder optimization is needed
         is_multi = len(images.partner_ids[0]) > 1
         
@@ -210,7 +210,7 @@ class TorchBA():
                 self.ref_poses = nn.Parameter(TrackingTensor(pp.SE3(ref_poses)))
                 self.rel_poses = nn.Parameter(TrackingTensor(pp.SE3(rel_poses)))
                 self.ref_poses.requires_grad_(BUNDLE_ADJUSTER_OPTIONS['optimize_poses'])
-                self.rel_poses.requires_grad_(BUNDLE_ADJUSTER_OPTIONS['optimize_poses'])
+                self.rel_poses.requires_grad_(False) # Freeze relative poses
                 self.ref_poses.trim_SE3_grad = True
                 self.rel_poses.trim_SE3_grad = True
 
@@ -253,13 +253,24 @@ class TorchBA():
             for idx, cam in enumerate(cameras):
                 cam.set_params(camera_params_np[idx])
 
+        # --- SAFEGUARD 1: Subsampling ---
         # filter out tracks with too few observations
+        print(f"Filtering {len(tracks)} tracks by min_num_view_per_track={BUNDLE_ADJUSTER_OPTIONS['min_num_view_per_track']}...", flush=True)
         valid_tracks_mask = np.array([tracks.observations[i].shape[0] >= BUNDLE_ADJUSTER_OPTIONS['min_num_view_per_track'] 
                                       for i in range(len(tracks))], dtype=bool)
-        valid_indices = np.where(valid_tracks_mask)[0]
         
-        # Filter tracks in-place to maintain reference semantics
         tracks.filter_by_mask(valid_tracks_mask)
+        print(f"Tracks remaining after filtering: {len(tracks)}", flush=True)
+
+        # Subsample if too many tracks to prevent OOM
+        max_tracks = BUNDLE_ADJUSTER_OPTIONS.get('max_tracks_for_ba', 200000)
+        if len(tracks) > max_tracks:
+            print(f"Subsampling tracks from {len(tracks)} to {max_tracks} to prevent OOM...", flush=True)
+            indices = np.random.choice(len(tracks), max_tracks, replace=False)
+            keep_mask = np.zeros(len(tracks), dtype=bool)
+            keep_mask[indices] = True
+            tracks.filter_by_mask(keep_mask)
+            print(f"Tracks remaining after subsampling: {len(tracks)}", flush=True)
 
         # Build grouping (rows and columns) from partner_ids if available, similar to global_positioning
         registered_indices = images.get_registered_indices()
@@ -311,9 +322,7 @@ class TorchBA():
             print("Enforcing zero baseline (translation) for rig cameras in BA.")
 
         # Initialize Relative Poses (T_rig_cam)
-        # We define the Rig Frame to be aligned with folder_keys[0] (Column 0).
         rel_poses_init = [None] * num_columns
-        # Identity for the reference camera
         rel_poses_init[0] = torch.tensor([0, 0, 0, 0, 0, 0, 1], dtype=torch.float64, device=self.device) 
         
         ref_key = folder_keys[0]
@@ -331,16 +340,14 @@ class TorchBA():
                     pose_ref = pp.mat2SE3(images.world2cams[id_ref])
                     pose_tgt = pp.mat2SE3(images.world2cams[id_tgt])
                     
-                    # T_rig_tgt = T_w_ref^-1 * T_w_tgt (since T_w_ref = T_w_rig)
                     delta = pose_ref.Inv() * pose_tgt
                     
                     if enforce_zero_baseline:
-                         # Zero out translation
                         d_tensor = delta.tensor()
                         d_tensor[..., :3] = 0
-                        deltas.append(d_tensor)
+                        deltas.append(d_tensor.to(self.device))
                     else:
-                        deltas.append(delta.tensor())
+                        deltas.append(delta.tensor().to(self.device))
             
             if deltas:
                 rel_poses_init[c] = deltas[0]
@@ -349,21 +356,20 @@ class TorchBA():
                 rel_poses_init[c] = torch.tensor([0, 0, 0, 0, 0, 0, 1], dtype=torch.float64, device=self.device)
 
         rel_poses = torch.stack(rel_poses_init).to(self.device).to(torch.float64)
+        rel_poses.requires_grad_(False)
 
         # Initialize Group Poses (T_w_rig)
         group_pose_init = []
         for rid in range(num_groups):
             p_dict = row_dicts[rid]
-            
-            # Find any present camera to infer rig pose
             found = False
             for c, key in enumerate(folder_keys):
                 if key in p_dict:
                     img_id = p_dict[key]
-                    pose_cam = pp.mat2SE3(images.world2cams[img_id]) # T_w_cam
+                    pose_cam_mat = torch.tensor(images.world2cams[img_id], device=self.device, dtype=torch.float64)
+                    pose_cam = pp.mat2SE3(pose_cam_mat) # T_w_cam
                     rel_pose = pp.SE3(rel_poses[c]) # T_rig_cam
                     
-                    # T_w_rig = T_w_cam * T_rig_cam^-1
                     pose_rig = pose_cam * rel_pose.Inv()
                     group_pose_init.append(pose_rig.tensor())
                     found = True
@@ -380,7 +386,7 @@ class TorchBA():
             cam_params = torch.tensor(camera.params)
             camera_intrs_list.append(cam_params)
         camera_intrs = torch.stack(camera_intrs_list, dim=0).to(self.device).to(torch.float64)
-        # because principal point is not optimized, remove it from camera params
+        
         pp_indices = torch.tensor(self.camera_model_info['pp'], device=self.device)
         camera_pps = camera_intrs[..., pp_indices]
         all_indices = torch.arange(camera_intrs.shape[1], device=self.device)
@@ -390,30 +396,78 @@ class TorchBA():
         # Batch extract track positions
         points_3d = torch.tensor(tracks.xyzs, device=self.device, dtype=torch.float64)
 
+        # --- SAFEGUARD 2: Vectorization ---
+        print("Vectorizing track observations for Multi-Camera BA...", flush=True)
+        start_vec = time.time()
+
+        # Pre-compute lookups
+        max_img_id = len(images)
+        img_to_gid = np.full(max_img_id, -1, dtype=np.int32)
+        img_to_midx = np.full(max_img_id, -1, dtype=np.int32)
+        img_to_cam_idx = np.full(max_img_id, -1, dtype=np.int32)
+        
+        for img_id, gid in image_group_idx.items():
+            img_to_gid[img_id] = gid
+        for img_id, midx in image_member_idx.items():
+            img_to_midx[img_id] = midx
+        for img_id in range(len(images)):
+            if images.is_registered[img_id]:
+                img_to_cam_idx[img_id] = images.cam_ids[img_id]
+
+        # 1. Flatten observations
+        obs_lengths = np.array([len(o) for o in tracks.observations])
+        if len(tracks.observations) > 0:
+            all_obs = np.concatenate(tracks.observations)
+            all_track_ids = np.repeat(np.arange(len(tracks)), obs_lengths)
+        else:
+            all_obs = np.zeros((0, 2), dtype=np.int32)
+            all_track_ids = np.zeros(0, dtype=np.int32)
+
+        # 2. Filter by registered images
+        valid_mask = images.is_registered[all_obs[:, 0]]
+        all_obs = all_obs[valid_mask]
+        all_track_ids = all_track_ids[valid_mask]
+
+        # 3. Sort by image_id for grouped processing
+        sort_idx = np.argsort(all_obs[:, 0])
+        all_obs = all_obs[sort_idx]
+        all_track_ids = all_track_ids[sort_idx]
+
+        # 4. Extract Features (Points 2D)
+        unique_image_ids, split_indices = np.unique(all_obs[:, 0], return_index=True)
+        split_indices = np.append(split_indices, len(all_obs))
+        
         points_2d_list = []
-        camera_indices_list = []
-        image_group_indices_list = []
-        image_member_indices_list = []
-        point_indices_list = []
-        for track_id in range(len(tracks)):
-            track_obs = tracks.observations[track_id]
-            for image_id, feature_id in track_obs:
-                if not images.is_registered[image_id]:
-                    continue
-                point2D = images.features[image_id][feature_id]
-                points_2d_list.append(point2D)
-                camera_indices_list.append(images.cam_ids[image_id])
+        for i in range(len(unique_image_ids)):
+            image_id = unique_image_ids[i]
+            start_idx = split_indices[i]
+            end_idx = split_indices[i+1]
+            feature_ids = all_obs[start_idx:end_idx, 1]
+            
+            features = images.features[image_id][feature_ids]
+            points_2d_list.append(features)
+            
+        if points_2d_list:
+            points_2d_np = np.concatenate(points_2d_list)
+        else:
+            points_2d_np = np.zeros((0, 2))
 
-                gid = image_group_idx[image_id]
-                midx = image_member_idx[image_id]
-                image_group_indices_list.append(gid)
-                image_member_indices_list.append(midx)
-                point_indices_list.append(track_id)
+        # 5. Map indices
+        image_ids_flat = all_obs[:, 0]
+        gids_flat = img_to_gid[image_ids_flat]
+        midxs_flat = img_to_midx[image_ids_flat]
+        cam_idxs_flat = img_to_cam_idx[image_ids_flat]
+        
+        grouping_indices_np = np.column_stack([gids_flat, midxs_flat])
+        point_indices_np = all_track_ids
+        camera_indices_np = cam_idxs_flat
 
-        points_2d = torch.tensor(np.array(points_2d_list), dtype=torch.float64, device=self.device)
-        camera_indices = torch.tensor(np.array(camera_indices_list), dtype=torch.int32, device=self.device)
-        grouping_indices = torch.tensor(np.array(list(zip(image_group_indices_list, image_member_indices_list))), dtype=torch.int32, device=self.device)
-        point_indices = torch.tensor(np.array(point_indices_list), dtype=torch.int32, device=self.device)
+        print(f"Vectorization complete in {time.time() - start_vec:.4f}s. Processing {len(points_2d_np)} observations.", flush=True)
+
+        points_2d = torch.tensor(points_2d_np, dtype=torch.float64, device=self.device)
+        camera_indices = torch.tensor(camera_indices_np, dtype=torch.int32, device=self.device)
+        grouping_indices = torch.tensor(grouping_indices_np, dtype=torch.int32, device=self.device)
+        point_indices = torch.tensor(point_indices_np, dtype=torch.int32, device=self.device)
 
         model = ReprojNonBatched(camera_intrs, points_3d, ref_poses, rel_poses)
         strategy = pp.optim.strategy.TrustRegion(radius=1e4, max=1e10, up=2.0, down=0.5**4)
@@ -431,19 +485,30 @@ class TorchBA():
 
         window_size = 4
         loss_history = []
-        progress_bar = tqdm.trange(BUNDLE_ADJUSTER_OPTIONS['max_num_iterations'], file=sys.stdout)
-        for _ in progress_bar:
+        max_iter = BUNDLE_ADJUSTER_OPTIONS['max_num_iterations']
+        print(f"Starting Multi-Camera BA with {max_iter} iterations...", flush=True)
+        
+        for i in range(max_iter):
+            iter_start = time.time()
+            print(f"  [BA-Multi] Iteration {i+1}/{max_iter} started...", flush=True)
+            
             loss = optimizer.step(input)
-            loss_history.append(loss.item())
+            
+            iter_time = time.time() - iter_start
+            loss_val = loss.item()
+            print(f"  [BA-Multi] Iteration {i+1} completed in {iter_time:.2f}s. Loss: {loss_val:.6f}", flush=True)
+            
+            loss_history.append(loss_val)
             if len(loss_history) >= 2*window_size:
                 avg_recent = np.mean(loss_history[-window_size:])
                 avg_previous = np.mean(loss_history[-2*window_size:-window_size])
                 improvement = (avg_previous - avg_recent) / avg_previous
                 if abs(improvement) < BUNDLE_ADJUSTER_OPTIONS['function_tolerance']:
+                    print(f"  [BA-Multi] Converged at iteration {i+1} (improvement {improvement:.2e} < {BUNDLE_ADJUSTER_OPTIONS['function_tolerance']})", flush=True)
                     break
-                if loss_history[-1] == loss_history[-2]: # no improvement likely because linear solver failed
+                if loss_history[-1] == loss_history[-2]: 
+                    print(f"  [BA-Multi] Stalled at iteration {i+1} (no change in loss)", flush=True)
                     break
-            progress_bar.set_postfix({"loss": loss.item()})
 
             if self.visualizer:
                 update(cameras, images, tracks, points_3d, 
@@ -452,7 +517,6 @@ class TorchBA():
                        ref_poses, rel_poses)
                 self.visualizer.add_step(cameras, images, tracks, "bundle_adjustment")
             
-        progress_bar.close()
         update(cameras, images, tracks, points_3d, 
                camera_intrs, camera_pps, remaining_indices, pp_indices,
                image_group_idx, image_member_idx,

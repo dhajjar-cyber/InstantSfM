@@ -211,9 +211,10 @@ def SolveGlobalMapper(view_graph:ViewGraph, cameras, images, config:Config, dept
 
         gp_engine = TorchGP(visualizer=visualizer)
         
-        log("Initializing random positions...")
+        log("Initializing positions (Spanning Tree)...")
         start_init = time.time()
-        gp_engine.InitializeRandomPositions(cameras, images, tracks, depths)
+        # gp_engine.InitializeRandomPositions(cameras, images, tracks, depths)
+        gp_engine.InitializePositions(cameras, images, tracks, view_graph, depths)
         log(f"Initialization took {time.time() - start_init:.4f} seconds")
         
         log("Optimizing global positions...")
@@ -252,6 +253,7 @@ def SolveGlobalMapper(view_graph:ViewGraph, cameras, images, config:Config, dept
                 torch.cuda.empty_cache()
                 
             start_ba = time.time()
+            # Switch to single_only=False to enable Rig BA
             ba_engine.Solve(cameras, images, tracks, config.BUNDLE_ADJUSTER_OPTIONS, single_only=False)
             log(f"  BA Solve took {time.time() - start_ba:.4f} seconds")
             

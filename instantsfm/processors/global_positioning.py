@@ -22,6 +22,120 @@ class TorchGP():
         self.device = device
         self.visualizer = visualizer
         
+    def InitializePositions(self, cameras, images, tracks, view_graph, depths=None):
+        print("Initializing global positions using Spanning Tree (BFS)...")
+        
+        # 1. Build Adjacency List
+        adj = {}
+        for pair in view_graph.image_pairs.values():
+            if not pair.is_valid:
+                continue
+            if pair.image_id1 not in adj: adj[pair.image_id1] = []
+            if pair.image_id2 not in adj: adj[pair.image_id2] = []
+            adj[pair.image_id1].append((pair.image_id2, pair))
+            adj[pair.image_id2].append((pair.image_id1, pair))
+            
+        # 2. Find Root (Max Degree)
+        max_deg = -1
+        root = -1
+        for img_id, neighbors in adj.items():
+            if len(neighbors) > max_deg:
+                max_deg = len(neighbors)
+                root = img_id
+                
+        if root == -1:
+            print("Warning: No valid pairs found for initialization. Falling back to random.")
+            self.InitializeRandomPositions(cameras, images, tracks, depths)
+            return
+
+        print(f"Selected root image {root} with degree {max_deg}.")
+        
+        # 3. BFS Initialization
+        # Initialize all to 0
+        images.world2cams[:, :3, 3] = 0
+        visited = set([root])
+        queue = [root]
+        
+        # Set root to origin (or keep its current random/zero if we want)
+        # Actually, we should respect the rotation.
+        # t_j = t_ij + R_ij * t_i
+        # If t_root = 0, then t_j = t_root_j
+        
+        while queue:
+            u = queue.pop(0)
+            
+            # Current global pose
+            # R_u = images.world2cams[u, :3, :3]
+            t_u = images.world2cams[u, :3, 3]
+            
+            if u not in adj: continue
+            
+            for v, pair in adj[u]:
+                if v in visited:
+                    continue
+                
+                # Get relative pose from u to v
+                # pair stores id1 -> id2
+                # if u == id1, then t_uv = pair.t
+                # if u == id2, then t_vu = -R_uv.T * t_uv
+                
+                # R_uv = R_v * R_u^T
+                # t_uv = t_v - R_uv * t_u
+                # => t_v = t_uv + R_uv * t_u
+                
+                if u == pair.image_id1:
+                    # Forward: u -> v
+                    t_rel = pair.translation
+                    q_rel = pair.rotation
+                    R_rel = pp.SO3(q_rel).matrix().numpy()
+                    
+                    # t_v = t_rel + R_rel @ t_u
+                    t_v = t_rel + R_rel @ t_u
+                else:
+                    # Backward: v -> u (stored is u -> v)
+                    # We need t_vu and R_vu
+                    # R_vu = R_uv.T
+                    # t_vu = -R_vu @ t_uv
+                    
+                    t_uv = pair.translation
+                    q_uv = pair.rotation
+                    R_uv = pp.SO3(q_uv).matrix().numpy()
+                    
+                    R_vu = R_uv.T
+                    t_vu = -R_vu @ t_uv
+                    
+                    # t_v = t_vu + R_vu @ t_u
+                    t_v = t_vu + R_vu @ t_u
+                
+                images.world2cams[v, :3, 3] = t_v
+                visited.add(v)
+                queue.append(v)
+                
+        print(f"Initialized {len(visited)} images out of {len(images)}.")
+        
+        # Handle disconnected components (random init for them)
+        # But usually we only keep the largest connected component anyway.
+        
+        # Batch initialize track positions
+        # Triangulate tracks based on new camera poses
+        print("Triangulating tracks for initialization...")
+        # Simple triangulation: average of ray intersections?
+        # Or just random around the cameras?
+        # Let's stick to random for tracks, or use the existing logic but scaled?
+        # The existing logic used scene_scale.
+        # Since we used unit steps, the scale is roughly 1.0 per step.
+        
+        # Let's use the original random init for tracks, but centered?
+        # Or better: Leave tracks as random, the optimizer will fix them quickly if cameras are good.
+        # But we need to set is_initialized.
+        
+        scene_scale = 10.0 # Arbitrary
+        tracks.xyzs[:] = scene_scale * np.random.uniform(-1, 1, (len(tracks), 3))
+        tracks.is_initialized[:] = True
+
+        if self.visualizer:
+            self.visualizer.add_step(cameras, images, tracks)
+
     def InitializeRandomPositions(self, cameras, images, tracks, depths=None):
         # calculate average valid depth to estimate scale of the scene
         scene_scale = 100
@@ -40,7 +154,7 @@ class TorchGP():
         if self.visualizer:
             self.visualizer.add_step(cameras, images, tracks)
 
-    def Optimize(self, cameras, images, tracks, depths, GLOBAL_POSITIONER_OPTIONS, single_only=True):
+    def Optimize(self, cameras, images, tracks, depths, GLOBAL_POSITIONER_OPTIONS, single_only=False):
         # use an arbitrary image to determine if multi-folder optimization is needed
         is_multi = len(images.partner_ids[0]) > 1
         if is_multi and not single_only:
@@ -326,13 +440,25 @@ class TorchGP():
                 R = images.world2cams[image_id, :3, :3]
                 t = images.world2cams[image_id, :3, 3]
                 images.world2cams[image_id, :3, 3] = -(R @ t)
-        # filter out tracks with too few observations - modify in-place
+
+        # filter out tracks with too few observations
+        print(f"Filtering {len(tracks)} tracks by min_num_view_per_track={GLOBAL_POSITIONER_OPTIONS['min_num_view_per_track']}...", flush=True)
         valid_mask = np.array([tracks.observations[i].shape[0] >= GLOBAL_POSITIONER_OPTIONS['min_num_view_per_track'] 
                                for i in range(len(tracks))])
-        valid_indices = np.where(valid_mask)[0]
         
         # Filter tracks in-place to maintain reference semantics
         tracks.filter_by_mask(valid_mask)
+        print(f"Tracks remaining after filtering: {len(tracks)}", flush=True)
+
+        # Subsample if too many tracks to prevent OOM
+        max_tracks = GLOBAL_POSITIONER_OPTIONS.get('max_tracks_for_gp', 200000)
+        if len(tracks) > max_tracks:
+            print(f"Subsampling tracks from {len(tracks)} to {max_tracks} to prevent OOM...", flush=True)
+            indices = np.random.choice(len(tracks), max_tracks, replace=False)
+            keep_mask = np.zeros(len(tracks), dtype=bool)
+            keep_mask[indices] = True
+            tracks.filter_by_mask(keep_mask)
+            print(f"Tracks remaining after subsampling: {len(tracks)}", flush=True)
         
         # filter out images that have no tracks
         image_used = np.zeros(len(images), dtype=bool)
@@ -354,13 +480,6 @@ class TorchGP():
         points_3d = torch.tensor(tracks.xyzs, dtype=torch.float64, device=self.device)
 
         # build grouping as rows (groups) and columns (folder keys)
-        # Each image that has partner_ids contains a dict: folder_name -> image_id
-        # Different groups (rows) share the same set of folder names; we treat column 0
-        # (first folder in sorted order) as the reference per-group. We create:
-        #  - ref_trans: per-row reference translation (G x 3)
-        #  - rel_trans: per-column relative translation shared across rows (C x 3)
-        # and map each image -> (group_row_idx, column_idx).
-        # Collect partner dicts to infer column (folder) ordering
         partner_dicts = [images.partner_ids[idx] for idx in registered_indices]
         folder_keys = sorted(list(partner_dicts[0].keys()))
 
@@ -421,51 +540,101 @@ class TorchGP():
         ref_trans = torch.tensor(np.array(group_refs_init), dtype=torch.float64, device=self.device)
         rel_trans = torch.tensor(rel_trans_init, dtype=torch.float64, device=self.device)
 
+        # Pre-compute image_id -> (gid, midx) array for fast lookup
+        max_img_id = len(images)
+        img_to_gid = np.full(max_img_id, -1, dtype=np.int32)
+        img_to_midx = np.full(max_img_id, -1, dtype=np.int32)
+        for img_id, gid in image_group_idx.items():
+            img_to_gid[img_id] = gid
+        for img_id, midx in image_member_idx.items():
+            img_to_midx[img_id] = midx
+
+        print("Vectorizing track observations for Multi-Camera optimization...", flush=True)
+        start_vec = time.time()
+
+        # 1. Flatten observations
+        obs_lengths = np.array([len(o) for o in tracks.observations])
+        if len(tracks.observations) > 0:
+            all_obs = np.concatenate(tracks.observations)
+            all_track_ids = np.repeat(np.arange(len(tracks)), obs_lengths)
+        else:
+            all_obs = np.zeros((0, 2), dtype=np.int32)
+            all_track_ids = np.zeros(0, dtype=np.int32)
+
+        # 2. Filter by registered images
+        valid_mask = images.is_registered[all_obs[:, 0]]
+        all_obs = all_obs[valid_mask]
+        all_track_ids = all_track_ids[valid_mask]
+
+        # 3. Sort by image_id for grouped processing
+        sort_idx = np.argsort(all_obs[:, 0])
+        all_obs = all_obs[sort_idx]
+        all_track_ids = all_track_ids[sort_idx]
+
+        # 4. Compute Translations
+        unique_image_ids, split_indices = np.unique(all_obs[:, 0], return_index=True)
+        split_indices = np.append(split_indices, len(all_obs))
+        
         translations_list = []
-        image_group_indices_list = []
-        image_member_indices_list = []
-        point_indices_list = []
         depth_values_list = []
         depth_availability_list = []
 
-        for track_id in range(len(tracks)):
-            for image_id, feature_id in tracks.observations[track_id]:
-                if not images.is_registered[image_id]:
-                    continue
-                if depths is not None:
-                    # get depth as scales for optimization
-                    depth = images.depths[image_id][feature_id]
-                    available = depth
-                    depth = depth if available else 1.0 # default value
-                    depth_values_list.append(1 / depth) # use inverse depth
-                    depth_availability_list.append(available)
-                R = images.world2cams[image_id, :3, :3]
-                feature_undist = images.features_undist[image_id][feature_id]
-                translation = R.T @ feature_undist
-                translations_list.append(translation)
-                # map to group and column indices (image ids were used as keys)
-                gid = image_group_idx[image_id]
-                midx = image_member_idx[image_id]
-                image_group_indices_list.append(gid)
-                image_member_indices_list.append(midx)
-                point_indices_list.append(track_id)
+        for i in range(len(unique_image_ids)):
+            image_id = unique_image_ids[i]
+            start_idx = split_indices[i]
+            end_idx = split_indices[i+1]
+            
+            feature_ids = all_obs[start_idx:end_idx, 1]
+            
+            # Vectorized translation computation
+            R = images.world2cams[image_id, :3, :3]
+            features_2d = images.features_undist[image_id][feature_ids]
+            if features_2d.shape[1] == 2:
+                features_3d = np.column_stack([features_2d, np.ones(len(features_2d))])
+            else:
+                features_3d = features_2d
+            
+            translations = features_3d @ R
+            translations_list.append(translations)
 
-                point_indices_list.append(track_id)
+            if depths is not None:
+                img_depths = images.depths[image_id][feature_ids]
+                available = img_depths > 0
+                safe_depths = np.where(available, img_depths, 1.0)
+                inv_depths = 1.0 / safe_depths
+                depth_values_list.append(inv_depths)
+                depth_availability_list.append(available)
 
-        translations = torch.tensor(np.array(translations_list), dtype=torch.float64, device=self.device)
-        grouping_indices = torch.tensor(np.array(list(zip(image_group_indices_list, image_member_indices_list))), dtype=torch.int32, device=self.device)
-        point_indices = torch.tensor(np.array(point_indices_list), dtype=torch.int32, device=self.device)
+        if translations_list:
+            translations_np = np.concatenate(translations_list)
+        else:
+            translations_np = np.zeros((0, 3))
+
+        # 5. Map to Group/Member indices
+        image_ids_flat = all_obs[:, 0]
+        gids_flat = img_to_gid[image_ids_flat]
+        midxs_flat = img_to_midx[image_ids_flat]
+        
+        grouping_indices_np = np.column_stack([gids_flat, midxs_flat])
+        point_indices_np = all_track_ids
+
+        print(f"Vectorization complete in {time.time() - start_vec:.4f}s. Processing {len(translations_np)} observations.", flush=True)
+
+        translations = torch.tensor(translations_np, dtype=torch.float64, device=self.device)
+        grouping_indices = torch.tensor(grouping_indices_np, dtype=torch.int32, device=self.device)
+        point_indices = torch.tensor(point_indices_np, dtype=torch.int32, device=self.device)
         is_calibrated = torch.tensor([cameras[images.cam_ids[idx]].has_prior_focal_length 
                                      for idx in registered_indices], 
                                      dtype=torch.bool, device=self.device)
         
         scale_indices = None
         if depths is None:
-            scales = torch.ones(len(translations_list), 1, dtype=torch.float64, device=self.device)
+            scales = torch.ones(len(translations), 1, dtype=torch.float64, device=self.device)
         else:
-            scales = torch.tensor(np.array(depth_values_list), dtype=torch.float64, device=self.device).unsqueeze(1)
-            depth_availability = torch.tensor(np.array(depth_availability_list), dtype=torch.bool, device=self.device).unsqueeze(1)
-            # indices for optimizer to calculate loss with valid depth scale
+            depth_values_np = np.concatenate(depth_values_list)
+            depth_availability_np = np.concatenate(depth_availability_list)
+            scales = torch.tensor(depth_values_np, dtype=torch.float64, device=self.device).unsqueeze(1)
+            depth_availability = torch.tensor(depth_availability_np, dtype=torch.bool, device=self.device).unsqueeze(1)
             scale_indices = torch.where(depth_availability == 1)[0]
 
         # Clear memory
@@ -486,17 +655,27 @@ class TorchGP():
         }
         window_size = 4
         loss_history = []
-        progress_bar = tqdm.trange(GLOBAL_POSITIONER_OPTIONS['max_num_iterations'], file=sys.stdout)
-        for _ in progress_bar:
+        max_iter = GLOBAL_POSITIONER_OPTIONS['max_num_iterations']
+        print(f"Starting Multi-Camera optimization with {max_iter} iterations...", flush=True)
+        
+        for i in range(max_iter):
+            iter_start = time.time()
+            print(f"  [GP-Multi] Iteration {i+1}/{max_iter} started...", flush=True)
+            
             loss = optimizer.step(input)
-            loss_history.append(loss.item())
+            
+            iter_time = time.time() - iter_start
+            loss_val = loss.item()
+            print(f"  [GP-Multi] Iteration {i+1} completed in {iter_time:.2f}s. Loss: {loss_val:.6f}", flush=True)
+            
+            loss_history.append(loss_val)
             if len(loss_history) >= 2*window_size:
                 avg_recent = np.mean(loss_history[-window_size:])
                 avg_previous = np.mean(loss_history[-2*window_size:-window_size])
                 improvement = (avg_previous - avg_recent) / avg_previous
                 if abs(improvement) < GLOBAL_POSITIONER_OPTIONS['function_tolerance']:
+                    print(f"  [GP-Multi] Converged at iteration {i+1} (improvement {improvement:.2e} < {GLOBAL_POSITIONER_OPTIONS['function_tolerance']})", flush=True)
                     break
-            progress_bar.set_postfix({"loss": loss.item()})
 
             if self.visualizer:
                 update(cameras, images, tracks, points_3d, 
@@ -504,7 +683,6 @@ class TorchGP():
                        ref_trans, rel_trans)
                 self.visualizer.add_step(cameras, images, tracks, "global_positioning")
             
-        progress_bar.close()
         update(cameras, images, tracks, points_3d, 
                image_idx2id, image_group_idx, image_member_idx,
                ref_trans, rel_trans)

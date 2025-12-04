@@ -59,7 +59,8 @@ def process_match_chunk(chunk):
 
         config = ConfigurationType(config)
         image_pair.config = config
-        if config in [ConfigurationType.UNDEFINED, ConfigurationType.DEGENERATE, ConfigurationType.WATERMARK, ConfigurationType.MULTIPLE]:
+        # Modified: Allow WATERMARK because small-baseline pairs are often misclassified as watermarks
+        if config in [ConfigurationType.UNDEFINED, ConfigurationType.DEGENERATE, ConfigurationType.MULTIPLE]:
             image_pair.is_valid = False
             chunk_invalid += 1
             chunk_reasons[config.name] += 1
