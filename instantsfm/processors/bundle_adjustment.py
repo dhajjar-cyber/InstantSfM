@@ -519,6 +519,10 @@ class TorchBA():
 
         print(f"Vectorization complete in {time.time() - start_vec:.4f}s. Processing {len(points_2d_np)} observations.", flush=True)
 
+        if len(points_2d_np) == 0:
+            print("WARNING: No observations remaining. Skipping optimization.", flush=True)
+            return
+
         points_2d = torch.tensor(points_2d_np, dtype=torch.float64, device=self.device)
         camera_indices = torch.tensor(camera_indices_np, dtype=torch.int32, device=self.device)
         grouping_indices = torch.tensor(grouping_indices_np, dtype=torch.int32, device=self.device)
