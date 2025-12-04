@@ -49,6 +49,7 @@ CONFIG = {
     'BUNDLE_ADJUSTER_OPTIONS': {
         'optimize_poses': True,
         'optimize_points': True,
+        'max_tracks_for_ba': 200000,
         'min_num_view_per_track': 2,
         'thres_loss_function': 1.,
         'max_num_iterations': 200,

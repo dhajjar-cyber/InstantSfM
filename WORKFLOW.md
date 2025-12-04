@@ -120,13 +120,25 @@ Validate the global positioning using `modules/phase_1/scripts/diagnostics/diagn
 ## Phase 7: Bundle Adjustment (BA)
 *   **Goal:** The final polish.
 *   **Action:** Optimizes **everything** simultaneously (Camera Rotations, Camera Positions, and 3D Track Points) to minimize "Reprojection Error" (the difference between where a point appears in the photo and where the 3D model says it should be).
-    *   **Rig Mode:** Uses `OptimizeMulti` to maintain rigid constraints during the final polish.
-        *   **Constraint Enforcement:** Similar to Phase 6, if `enforce_zero_baseline` is enabled, the relative translations are frozen using `register_buffer`. This ensures the rig remains perfectly rigid while the global pose and structure are refined.
+    *   **Data Flow:** Receives the `tracks` object from Phase 6 (GP). Note that GP may have already subsampled the tracks (e.g., to 500k).
+    *   **Subsampling:** To manage GPU memory usage during this intensive optimization:
+        *   Filters tracks again based on `min_num_view_per_track` (Default: 2).
+        *   Randomly subsamples the remaining tracks down to `max_tracks_for_ba` (Default: 200,000) if the count exceeds this limit.
+    *   **Rig Mode (`OptimizeMulti`):** Uses a specialized optimization strategy for multi-camera rigs.
+        *   **Constraint Enforcement:** If `enforce_zero_baseline` is enabled, the relative poses (rotation and translation) between cameras in a rig are **frozen**.
+            *   *Technical Detail:* Similar to Phase 6, the relative pose tensor is registered as a **buffer** (`register_buffer`) instead of a parameter. This excludes it from the optimizer, ensuring the rig remains perfectly rigid while the global group poses and structure are refined.
 *   **Output:** A highly accurate, refined sparse 3D reconstruction.
     *   **Checkpoint:** `checkpoint_ba.pkl`
 *   **Code Reference:**
     *   **Orchestrator:** `instantsfm/processors/bundle_adjustment.py` -> `TorchBA`
     *   **Optimization:** `instantsfm/processors/bundle_adjustment.py` -> `OptimizeMulti` (Rig Mode)
+
+### Phase 7 Diagnostics
+You can reuse the Global Positioning diagnostics script to validate the final Bundle Adjustment output.
+*   **Command:** `python3 modules/phase_1/scripts/diagnostics/diagnose_gp.py /path/to/checkpoint_ba.pkl`
+*   **What to check:**
+    *   **Rig Consistency:** Verify that the "Spread" of relative transformations is still 0.0000 (proving the constraints held during BA).
+    *   **Trajectory:** Ensure the trajectory remains smooth and no new jumps were introduced during the refinement.
 
 ## Phase 8: Retriangulation (Optional)
 *   **Goal:** Fill in missing details.
