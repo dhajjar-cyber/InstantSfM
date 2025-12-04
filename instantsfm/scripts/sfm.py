@@ -25,7 +25,8 @@ def run_sfm():
     parser.add_argument('--save_rotation_checkpoint_path', help='Path to save checkpoint after rotation averaging')
     parser.add_argument('--save_tracks_checkpoint_path', help='Path to save checkpoint after track establishment')
     parser.add_argument('--save_gp_checkpoint_path', help='Path to save checkpoint after global positioning')
-    parser.add_argument('--resume_stage', default='relpose', choices=['relpose', 'rotation', 'tracks', 'gp'], help='Stage to resume from (relpose, rotation, tracks, or gp)')
+    parser.add_argument('--save_ba_checkpoint_path', help='Path to save checkpoint after bundle adjustment')
+    parser.add_argument('--resume_stage', default='relpose', choices=['relpose', 'rotation', 'tracks', 'gp', 'ba'], help='Stage to resume from (relpose, rotation, tracks, gp, or ba)')
     parser.add_argument('--max_tracks_for_gp', type=int, default=200000, help='Maximum number of tracks to use for global positioning (subsampling)')
     mapper_args = parser.parse_args()
 
@@ -93,6 +94,7 @@ def run_sfm():
     config.OPTIONS['save_rotation_checkpoint_path'] = mapper_args.save_rotation_checkpoint_path
     config.OPTIONS['save_tracks_checkpoint_path'] = mapper_args.save_tracks_checkpoint_path
     config.OPTIONS['save_gp_checkpoint_path'] = mapper_args.save_gp_checkpoint_path
+    config.OPTIONS['save_ba_checkpoint_path'] = mapper_args.save_ba_checkpoint_path
     config.OPTIONS['resume_stage'] = mapper_args.resume_stage
     
     # If checkpoint was loaded here, set skip flags
@@ -109,6 +111,11 @@ def run_sfm():
             config.OPTIONS['skip_rotation_averaging'] = True
             config.OPTIONS['skip_track_establishment'] = True
             config.OPTIONS['skip_global_positioning'] = True
+        elif mapper_args.resume_stage == 'ba':
+            config.OPTIONS['skip_rotation_averaging'] = True
+            config.OPTIONS['skip_track_establishment'] = True
+            config.OPTIONS['skip_global_positioning'] = True
+            config.OPTIONS['skip_bundle_adjustment'] = True
 
     if mapper_args.enable_gui or mapper_args.record_recon:
         visualizer = ReconstructionVisualizer(save_data=mapper_args.record_recon, 

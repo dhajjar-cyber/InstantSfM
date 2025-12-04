@@ -395,11 +395,17 @@ class TorchGP():
     def OptimizeMulti(self, cameras, images, tracks, depths, GLOBAL_POSITIONER_OPTIONS):
         cost_fn = pairwise_cost
         class PairwiseNonBatched(nn.Module):
-            def __init__(self, points_3d, scales, ref_trans, rel_trans, scale_indices=None):
+            def __init__(self, points_3d, scales, ref_trans, rel_trans, scale_indices=None, fix_rel_trans=False):
                 super().__init__()
                 self.points_3d = nn.Parameter(TrackingTensor(points_3d))  # [num_pts, 3]
                 self.ref_trans = nn.Parameter(TrackingTensor(ref_trans))
-                self.rel_trans = nn.Parameter(TrackingTensor(rel_trans))
+                
+                self.fix_rel_trans = fix_rel_trans
+                if self.fix_rel_trans:
+                    self.register_buffer('rel_trans', TrackingTensor(rel_trans))
+                else:
+                    self.rel_trans = nn.Parameter(TrackingTensor(rel_trans))
+
                 self.scales = nn.Parameter(TrackingTensor(scales))
                 if scale_indices is not None:
                     all_indices = torch.arange(scales.shape[0], device=scales.device)
@@ -408,7 +414,13 @@ class TorchGP():
             def forward(self, translations, grouping_indices, point_indices, is_calibrated):
                 group_idx = grouping_indices[:, 0]
                 member_idx = grouping_indices[:, 1]
-                camera_translations = self.ref_trans[group_idx] + self.rel_trans[member_idx]
+                
+                if self.fix_rel_trans:
+                    # Disconnect rel_trans from graph -> Zero gradient -> Zero update (due to LM damping)
+                    camera_translations = self.ref_trans[group_idx]
+                else:
+                    camera_translations = self.ref_trans[group_idx] + self.rel_trans[member_idx]
+                
                 calib_mask = is_calibrated[group_idx]
 
                 points_3d = self.points_3d
@@ -687,10 +699,14 @@ class TorchGP():
         gc.collect()
         torch.cuda.empty_cache()
 
-        model = PairwiseNonBatched(points_3d, scales, ref_trans, rel_trans, scale_indices=scale_indices)
+        model = PairwiseNonBatched(points_3d, scales, ref_trans, rel_trans, scale_indices=scale_indices, fix_rel_trans=enforce_zero_baseline)
         strategy = pp.optim.strategy.TrustRegion(radius=1e3, max=1e8, up=2.0, down=0.5**4)
         sparse_solver = PCG(tol=1e-5)
         huber_kernel = Huber(GLOBAL_POSITIONER_OPTIONS['thres_loss_function'])
+        
+        if enforce_zero_baseline:
+            print("  (Freezing relative translations by disconnecting from graph)")
+        
         optimizer = LM(model, strategy=strategy, solver=sparse_solver, kernel=huber_kernel, reject=30)
 
         input = {
@@ -724,11 +740,11 @@ class TorchGP():
                     break
 
             if self.visualizer:
-                update(cameras, images, tracks, points_3d, 
+                update(cameras, images, tracks, model.points_3d, 
                        image_idx2id, image_group_idx, image_member_idx,
-                       ref_trans, rel_trans)
+                       model.ref_trans, model.rel_trans)
                 self.visualizer.add_step(cameras, images, tracks, "global_positioning")
             
-        update(cameras, images, tracks, points_3d, 
+        update(cameras, images, tracks, model.points_3d, 
                image_idx2id, image_group_idx, image_member_idx,
-               ref_trans, rel_trans)
+               model.ref_trans, model.rel_trans)

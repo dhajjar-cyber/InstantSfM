@@ -278,6 +278,10 @@ def SolveGlobalMapper(view_graph:ViewGraph, cameras, images, config:Config, dept
         NormalizeReconstruction(images, tracks, depths)
         print('Bundle adjustment took: ', time.time() - start_time)
 
+        save_ba_path = config.OPTIONS.get('save_ba_checkpoint_path')
+        if save_ba_path:
+             save_checkpoint(save_ba_path, view_graph, cameras, images, tracks)
+
     if not config.OPTIONS['skip_retriangulation']:
         print('-------------------------------------')
         log('Running retriangulation ...')

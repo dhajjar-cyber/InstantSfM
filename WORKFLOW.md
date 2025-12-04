@@ -86,9 +86,24 @@ Validate the rotation quality using `modules/phase_1/scripts/diagnostics/diagnos
 ## Phase 6: Global Positioning
 *   **Goal:** Solve for the global position (X, Y, Z) of every camera.
 *   **Action:**
-    *   **Initialization:** Uses a Spanning Tree (BFS) to place cameras roughly in space.
-    *   **Optimization:** Moves cameras to minimize the error between where they *should* be (based on tracks) and where they *are*.
-    *   **Rig Mode:** If multiple cameras per timestamp are detected, `OptimizeMulti` is used to enforce rigid constraints between them, preventing drift in visually disconnected rigs.
+    *   **1. Initialization (Spanning Tree):**
+        *   Constructs a graph from pairwise connections.
+        *   Selects a root camera (highest connectivity).
+        *   Propagates positions via Breadth-First Search (BFS) using the relative translations ($t_{ij}$) computed in Phase 3. This provides a rough initial "skeleton" for the scene.
+    *   **2. Data Preparation:**
+        *   Filters tracks to ensure they have enough observations (min_num_view_per_track).
+        *   Subsamples tracks to fit within GPU memory limits during optimization. The limit is defined in `instantsfm/config/colmap.py` under `GLOBAL_POSITIONER_OPTIONS['max_tracks_for_gp']` (default: 500,000).
+    *   **3. Optimization (Levenberg-Marquardt):**
+        *   Formulates a non-linear least squares problem to minimize the difference between observed 2D features and projected 3D points.
+        *   **Rig Mode (`OptimizeMulti`):** Decomposes camera position into `Group_Ref_Pos + Relative_Pos`.
+            *   **Constraint Enforcement:** If `enforce_zero_baseline` is enabled, the `Relative_Pos` component is **frozen**.
+                *   *Technical Detail:* This is achieved by registering the relative translation tensor as a **buffer** (`register_buffer`) instead of a `nn.Parameter`. This excludes it from the optimizer's parameter list entirely, preventing the Levenberg-Marquardt solver from attempting to calculate gradients or updates for it. This ensures the relative translations remain exactly at their initialization (zero) and prevents optimizer crashes due to size mismatches.
+                *   *Result:* The optimizer moves the entire rig as a single rigid unit (`Group_Ref_Pos`), preventing individual cameras from drifting apart or violating the rig geometry.
+        *   **Solver:** Uses a sparse solver (PCG) with a Huber loss function to be robust against outliers.
+    *   **4. Post-Processing:**
+        *   Updates global coordinates in the `images` and `tracks` objects.
+        *   Normalizes the reconstruction (centers and scales the scene).
+        *   Filters tracks based on triangulation angles to remove unstable points.
 *   **Output:** **Global Positions** for every camera and rough 3D coordinates for the Tracks.
     *   **Checkpoint:** `checkpoint_gp.pkl`
 *   **Code Reference:**
@@ -96,11 +111,19 @@ Validate the rotation quality using `modules/phase_1/scripts/diagnostics/diagnos
     *   **Optimization:** `instantsfm/processors/global_positioning.py` -> `OptimizeMulti` (Rig Mode) / `OptimizeSingle` (Standard)
     *   **Solver:** `instantsfm/processors/global_positioning.py` -> `SolveMulti` (Linear Solver for Rig Mode)
 
+### Phase 6 Diagnostics
+Validate the global positioning using `modules/phase_1/scripts/diagnostics/diagnose_gp.py`.
+*   **Rig Consistency:** Checks the "spread" of relative translations within a rig. High spread indicates drift.
+*   **Trajectory Smoothness:** Analyzes velocity and acceleration to detect jumps.
+*   **Visualization:** Generates an interactive 3D plot (`gp_visualization.html`) to inspect camera placement and rig structure visually.
+
 ## Phase 7: Bundle Adjustment (BA)
 *   **Goal:** The final polish.
 *   **Action:** Optimizes **everything** simultaneously (Camera Rotations, Camera Positions, and 3D Track Points) to minimize "Reprojection Error" (the difference between where a point appears in the photo and where the 3D model says it should be).
     *   **Rig Mode:** Uses `OptimizeMulti` to maintain rigid constraints during the final polish.
+        *   **Constraint Enforcement:** Similar to Phase 6, if `enforce_zero_baseline` is enabled, the relative translations are frozen using `register_buffer`. This ensures the rig remains perfectly rigid while the global pose and structure are refined.
 *   **Output:** A highly accurate, refined sparse 3D reconstruction.
+    *   **Checkpoint:** `checkpoint_ba.pkl`
 *   **Code Reference:**
     *   **Orchestrator:** `instantsfm/processors/bundle_adjustment.py` -> `TorchBA`
     *   **Optimization:** `instantsfm/processors/bundle_adjustment.py` -> `OptimizeMulti` (Rig Mode)

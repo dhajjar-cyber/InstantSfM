@@ -36,8 +36,10 @@ class TorchBA():
         enforce_zero_baseline = BUNDLE_ADJUSTER_OPTIONS.get('enforce_zero_baseline', False)
         
         if is_multi and not single_only:
+            print("Invoking Multi-Camera Bundle Adjustment...", flush=True)
             self.SolveMulti(cameras, images, tracks, BUNDLE_ADJUSTER_OPTIONS)
         else:
+            print("Invoking Single-Camera Bundle Adjustment...", flush=True)
             if enforce_zero_baseline:
                 print("WARNING: enforce_zero_baseline is True, but falling back to single-camera BA.")
                 print(f"         is_multi={is_multi}, single_only={single_only}")
@@ -96,6 +98,10 @@ class TorchBA():
                                       for i in range(len(tracks))], dtype=bool)        
         # Filter tracks in-place to maintain reference semantics
         tracks.filter_by_mask(valid_tracks_mask)
+        
+        if len(tracks) == 0:
+            print("WARNING: No tracks remaining after filtering. Skipping Single-Camera BA.", flush=True)
+            return
         
         # filter out images that have no tracks and cameras that have no images
         image_used = np.zeros(len(images), dtype=bool)
@@ -211,9 +217,9 @@ class TorchBA():
         except:
             raise NotImplementedError("Unsupported camera model")
         class ReprojNonBatched(nn.Module):
-            def __init__(self, camera_intrs, points_3d, ref_poses, rel_poses):
+            def __init__(self, camera_intrs, points_3d, ref_poses, rel_poses, fix_rel_poses=True):
                 super().__init__()
-                self.intrs = nn.Parameter(TrackingTensor(camera_intrs))  # [num_cams, x], x is the number of intrinsics (excluding principal point)
+                self.intrs = nn.Parameter(TrackingTensor(camera_intrs))  # [num_cams, x]
                 self.points_3d = nn.Parameter(TrackingTensor(points_3d))  # [num_pts, 3]
                 
                 # Conditionally make ref_poses a Parameter
@@ -221,18 +227,16 @@ class TorchBA():
                     self.ref_poses = nn.Parameter(TrackingTensor(pp.SE3(ref_poses)))
                     self.ref_poses.trim_SE3_grad = True
                 else:
-                    # If not optimizing poses, we still need it to be a tensor, but not a parameter
-                    # However, if it's not a parameter, it won't be in model.parameters()
-                    # But if we use it in forward, autograd might try to track it if it has grad history.
-                    # Let's ensure it's a plain tensor without grad.
                     self.ref_poses = pp.SE3(ref_poses)
 
-                # CRITICAL FIX: Register rel_poses as a buffer so it's part of the module state 
-                # but NOT a parameter returned by parameters().
-                # This prevents the optimizer from seeing it, while keeping it on the correct device.
-                # We need to store the underlying tensor data.
-                # rel_poses is already a Tensor (from torch.stack), so we register it directly.
-                self.register_buffer('rel_poses_data', rel_poses)
+                self.fix_rel_poses = fix_rel_poses
+                if self.fix_rel_poses:
+                    # Register as buffer -> Not in model.parameters() -> Ignored by Optimizer
+                    self.register_buffer('rel_poses_data', rel_poses)
+                else:
+                    # Register as Parameter -> Optimized
+                    self.rel_poses = nn.Parameter(TrackingTensor(pp.SE3(rel_poses)))
+                    self.rel_poses.trim_SE3_grad = True
 
             def forward(self, points_2d, camera_indices, grouping_indices, point_indices, camera_pps):
                 group_idx = grouping_indices[:, 0]
@@ -241,8 +245,12 @@ class TorchBA():
                 # ref_poses is a TrackingTensor (N, 7)
                 ref_vec = self.ref_poses[group_idx]
                 
-                # rel_poses_data is a Tensor (N, 7) - constant
-                rel_vec = self.rel_poses_data[member_idx]
+                if self.fix_rel_poses:
+                    # rel_poses_data is a Tensor (N, 7) - constant
+                    rel_vec = self.rel_poses_data[member_idx]
+                else:
+                    # rel_poses is a Parameter (N, 7) - optimized
+                    rel_vec = self.rel_poses[member_idx]
                 
                 # Use map_transform helper to combine poses while preserving graph
                 image_poses = compute_combined_poses(ref_vec, rel_vec)
@@ -316,6 +324,10 @@ class TorchBA():
         
         tracks.filter_by_mask(valid_tracks_mask)
         print(f"Tracks remaining after filtering: {len(tracks)}", flush=True)
+
+        if len(tracks) == 0:
+            print("WARNING: No tracks remaining after filtering. Skipping Multi-Camera BA.", flush=True)
+            return
 
         # Subsample if too many tracks to prevent OOM
         max_tracks = BUNDLE_ADJUSTER_OPTIONS.get('max_tracks_for_ba', 200000)
@@ -528,7 +540,7 @@ class TorchBA():
         grouping_indices = torch.tensor(grouping_indices_np, dtype=torch.int32, device=self.device)
         point_indices = torch.tensor(point_indices_np, dtype=torch.int32, device=self.device)
 
-        model = ReprojNonBatched(camera_intrs, points_3d, ref_poses, rel_poses)
+        model = ReprojNonBatched(camera_intrs, points_3d, ref_poses, rel_poses, fix_rel_poses=enforce_zero_baseline)
         strategy = pp.optim.strategy.TrustRegion(radius=1e4, max=1e10, up=2.0, down=0.5**4)
         sparse_solver = PCG(tol=1e-5)
         huber_kernel = Huber(BUNDLE_ADJUSTER_OPTIONS['thres_loss_function'])
