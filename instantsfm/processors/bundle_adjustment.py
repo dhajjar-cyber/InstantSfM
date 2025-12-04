@@ -417,7 +417,13 @@ class TorchBA():
                         deltas.append(delta.tensor().to(self.device))
             
             if deltas:
-                rel_poses_init[c] = deltas[0]
+                # Average the relative poses (simple averaging of quaternions/translation)
+                # For rotations, simple averaging of quaternions is a reasonable approximation for small deviations
+                # Ideally we would use chordal L2 mean or similar, but mean of tensor is okay for initialization
+                deltas_stack = torch.stack(deltas)
+                rel_poses_init[c] = torch.mean(deltas_stack, dim=0)
+                # Re-normalize quaternion part to ensure valid rotation
+                rel_poses_init[c][3:] = rel_poses_init[c][3:] / torch.norm(rel_poses_init[c][3:])
             else:
                 print(f"WARNING: No overlap found between {ref_key} and {target_key}. Initializing to Identity.")
                 rel_poses_init[c] = torch.tensor([0, 0, 0, 0, 0, 0, 1], dtype=torch.float64, device=self.device)

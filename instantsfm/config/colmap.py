@@ -13,9 +13,9 @@ CONFIG = {
         'max_reprojection_error': 1e-2,
         'min_triangulation_angle': 1.,
         'max_epipolar_error_E': 1.,
-        'max_epipolar_error_F': 4.,
-        'max_epipolar_error_H': 4.,
-        'min_inlier_num': 30,
+        'max_epipolar_error_F': 1.5,
+        'max_epipolar_error_H': 1.5,
+        'min_inlier_num': 50,
         'min_inlier_ratio': 0.25,
         'max_rotation_error': 10.,
     },
@@ -49,12 +49,12 @@ CONFIG = {
     'BUNDLE_ADJUSTER_OPTIONS': {
         'optimize_poses': True,
         'optimize_points': True,
-        'max_tracks_for_ba': 200000,
+        'max_tracks_for_ba': 500000,
         'min_num_view_per_track': 2,
         'thres_loss_function': 1.,
         'max_num_iterations': 200,
         'function_tolerance': 5e-4,
-        'enforce_zero_baseline': True, # Enforce zero translation between rig cameras
+        'enforce_zero_baseline': False, # Enforce zero translation between rig cameras
     },
     'TRIANGULATOR_OPTIONS': {
         'min_num_view_per_track': 2,

@@ -6,7 +6,7 @@ This document outlines the high-level pipeline of InstantSFM. It follows a "Glob
 ## Phase 1: Preprocessing & View Graph Construction
 *   **Goal:** Build the "skeleton" of the reconstruction by establishing local relationships and identifying rig structures.
 *   **Input:** 
-    *   **Feature Matches:** 2D keypoint correspondences extracted from the database (e.g., COLMAP `.db`).
+    *   **Feature Matches:** 2D keypoint correspondences extracted from the database (e.g., COLMAP `.db`).  this comes from a preoivus process that uses colmap SIFT feature extraction and then incremental matcher for matching
     *   **Image Metadata:** Camera IDs, filenames, and initial parameters.
     *   *Note:* Actual pixel data is **not** used in this phase; only the feature matches are required.
 *   **Action:**
