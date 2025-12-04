@@ -1,6 +1,7 @@
 import numpy as np
 import tqdm
 import sys
+import time
 
 from instantsfm.utils.cost_function import reproject_funcs
 from instantsfm.scene.defs import get_camera_model_info
@@ -13,7 +14,14 @@ from pypose.optim.kernel import Huber
 from bae.utils.pysolvers import PCG
 from bae.utils.ba import rotate_quat
 from bae.optim import LM
-from bae.autograd.function import TrackingTensor
+from bae.autograd.function import TrackingTensor, map_transform
+
+@map_transform
+def compute_combined_poses(ref, rel):
+    # ref is pp.SE3 (from TrackingTensor)
+    # rel is Tensor (from buffer)
+    rel_se3 = pp.SE3(rel)
+    return ref * rel_se3
 
 class TorchBA():
     def __init__(self, visualizer=None, device="cuda:0"):
@@ -207,19 +215,66 @@ class TorchBA():
                 super().__init__()
                 self.intrs = nn.Parameter(TrackingTensor(camera_intrs))  # [num_cams, x], x is the number of intrinsics (excluding principal point)
                 self.points_3d = nn.Parameter(TrackingTensor(points_3d))  # [num_pts, 3]
-                self.ref_poses = nn.Parameter(TrackingTensor(pp.SE3(ref_poses)))
-                self.rel_poses = nn.Parameter(TrackingTensor(pp.SE3(rel_poses)))
-                self.ref_poses.requires_grad_(BUNDLE_ADJUSTER_OPTIONS['optimize_poses'])
-                self.rel_poses.requires_grad_(False) # Freeze relative poses
-                self.ref_poses.trim_SE3_grad = True
-                self.rel_poses.trim_SE3_grad = True
+                
+                # Conditionally make ref_poses a Parameter
+                if BUNDLE_ADJUSTER_OPTIONS.get('optimize_poses', True):
+                    self.ref_poses = nn.Parameter(TrackingTensor(pp.SE3(ref_poses)))
+                    self.ref_poses.trim_SE3_grad = True
+                else:
+                    # If not optimizing poses, we still need it to be a tensor, but not a parameter
+                    # However, if it's not a parameter, it won't be in model.parameters()
+                    # But if we use it in forward, autograd might try to track it if it has grad history.
+                    # Let's ensure it's a plain tensor without grad.
+                    self.ref_poses = pp.SE3(ref_poses)
+
+                # CRITICAL FIX: Register rel_poses as a buffer so it's part of the module state 
+                # but NOT a parameter returned by parameters().
+                # This prevents the optimizer from seeing it, while keeping it on the correct device.
+                # We need to store the underlying tensor data.
+                # rel_poses is already a Tensor (from torch.stack), so we register it directly.
+                self.register_buffer('rel_poses_data', rel_poses)
 
             def forward(self, points_2d, camera_indices, grouping_indices, point_indices, camera_pps):
                 group_idx = grouping_indices[:, 0]
                 member_idx = grouping_indices[:, 1]
-                ref_poses = self.ref_poses
-                rel_poses = self.rel_poses
-                image_poses = ref_poses[group_idx] * rel_poses[member_idx]
+                
+                # ref_poses is a TrackingTensor (N, 7)
+                ref_vec = self.ref_poses[group_idx]
+                
+                # rel_poses_data is a Tensor (N, 7) - constant
+                rel_vec = self.rel_poses_data[member_idx]
+                
+                # Use map_transform helper to combine poses while preserving graph
+                image_poses = compute_combined_poses(ref_vec, rel_vec)
+                
+                points_3d = self.points_3d
+                points_proj = cost_fn(points_3d[point_indices], image_poses,
+                                      self.intrs[camera_indices], camera_pps[camera_indices])
+                loss = points_proj - points_2d
+                return loss
+                # Or rather, TrackingTensor wraps the underlying data.
+                
+                # If ref_poses is a Parameter(TrackingTensor(pp.SE3(...))), accessing it gives a TrackingTensor.
+                # We need to convert it back to SE3 to call .matrix(), OR use pypose functional API.
+                
+                # Option 1: Convert to SE3 (this might re-introduce the graph issue if not careful)
+                # ref_se3 = pp.SE3(ref_poses[group_idx])
+                # ref_mat = ref_se3.matrix()
+                
+                # Option 2: Use pypose functional
+                # ref_mat = pp.matrix(ref_poses[group_idx]) # If supported
+                
+                # Option 3: If ref_poses is just a tensor of shape (N, 7), we can use pp.SE3(tensor).matrix()
+                # But ref_poses is a TrackingTensor.
+                
+                # Let's try constructing SE3 from the tensor data
+                ref_se3 = pp.SE3(ref_poses[group_idx])
+                ref_mat = ref_se3.matrix()
+                
+                rel_mat = rel_poses[member_idx].matrix()
+                image_poses_mat = ref_mat @ rel_mat
+                image_poses = pp.mat2SE3(image_poses_mat)
+                
                 points_3d = self.points_3d
                 points_proj = cost_fn(points_3d[point_indices], image_poses,
                                       self.intrs[camera_indices], camera_pps[camera_indices])

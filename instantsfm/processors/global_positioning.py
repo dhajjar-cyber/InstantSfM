@@ -481,7 +481,12 @@ class TorchGP():
 
         # build grouping as rows (groups) and columns (folder keys)
         partner_dicts = [images.partner_ids[idx] for idx in registered_indices]
-        folder_keys = sorted(list(partner_dicts[0].keys()))
+        
+        # Robustly collect all keys
+        all_keys = set()
+        for d in partner_dicts:
+            all_keys.update(d.keys())
+        folder_keys = sorted(list(all_keys))
 
         # build rows: key by tuple of image ids in folder_keys order (unique per-row)
         rows = {}  # row_key(tuple of ids) -> gid
@@ -490,19 +495,28 @@ class TorchGP():
         image_member_idx = {}
         gid = 0
         for image_id in registered_indices:
-            row_key = tuple(int(images.partner_ids[image_id][k]) for k in folder_keys)
+            # Handle missing keys with -1
+            row_key_list = []
+            p_ids = images.partner_ids[image_id]
+            for k in folder_keys:
+                if k in p_ids:
+                    row_key_list.append(int(p_ids[k]))
+                else:
+                    row_key_list.append(-1)
+            row_key = tuple(row_key_list)
 
             if row_key not in rows:
                 rows[row_key] = gid
-                row_images[gid] = [int(v) for v in row_key]
+                row_images[gid] = list(row_key)
                 gid += 1
 
         # now fill image -> (gid, column_idx) mapping
         for rk, gid in rows.items():
             imgs = row_images[gid]
             for cidx, img_id in enumerate(imgs):
-                image_group_idx[img_id] = gid
-                image_member_idx[img_id] = cidx
+                if img_id != -1:
+                    image_group_idx[img_id] = gid
+                    image_member_idx[img_id] = cidx
 
         num_groups = len(row_images)
         num_columns = len(folder_keys)
@@ -516,14 +530,21 @@ class TorchGP():
         if enforce_zero_baseline:
             print("Enforcing zero baseline (translation) for rig cameras.")
             
+        # Pass 1: Accumulate relative translations (using rows where ref is present)
         for rid in range(num_groups):
             imgs = row_images[rid]
             ref_img_id = imgs[0]
+            
+            if ref_img_id == -1:
+                continue
+
             ref_trans = images.world2cams[ref_img_id, :3, 3].copy()
-            group_refs_init.append(ref_trans)
+            
             # per-column relative
             for cidx in range(num_columns):
                 img_id = imgs[cidx]
+                if img_id == -1: continue
+
                 if enforce_zero_baseline:
                     # Force relative translation to be zero
                     rel_accum[cidx].append(np.zeros(3))
@@ -532,10 +553,35 @@ class TorchGP():
                     # T_rel = T_img - T_ref (approximate initialization)
                     rel = images.world2cams[img_id, :3, 3] - ref_trans
                     rel_accum[cidx].append(rel)
+        
         # average per-column across groups (if no data, zeros)
         rel_trans_init = np.zeros((num_columns, 3), dtype=np.float64)
         for cidx in range(num_columns):
-            rel_trans_init[cidx] = np.mean(np.stack(rel_accum[cidx], axis=0), axis=0)
+            if len(rel_accum[cidx]) > 0:
+                rel_trans_init[cidx] = np.mean(np.stack(rel_accum[cidx], axis=0), axis=0)
+
+        # Pass 2: Initialize group refs (handling missing ref images)
+        for rid in range(num_groups):
+            imgs = row_images[rid]
+            ref_img_id = imgs[0]
+            
+            if ref_img_id != -1:
+                ref_trans = images.world2cams[ref_img_id, :3, 3].copy()
+            else:
+                # Find fallback
+                found = False
+                for cidx, img_id in enumerate(imgs):
+                    if img_id != -1:
+                        # T_ref = T_img - T_rel
+                        T_img = images.world2cams[img_id, :3, 3]
+                        T_rel = rel_trans_init[cidx]
+                        ref_trans = T_img - T_rel
+                        found = True
+                        break
+                if not found:
+                    ref_trans = np.zeros(3) # Should not happen if row exists
+
+            group_refs_init.append(ref_trans)
 
         ref_trans = torch.tensor(np.array(group_refs_init), dtype=torch.float64, device=self.device)
         rel_trans = torch.tensor(rel_trans_init, dtype=torch.float64, device=self.device)

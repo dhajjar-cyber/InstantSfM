@@ -1,4 +1,5 @@
 # InstantSFM Workflow
+* Main caller : /workspace/3DCD/modules/phase_1/scripts/SFM/run_instantsfm_reconstruction.sh
 
 This document outlines the high-level pipeline of InstantSFM. It follows a "Global SfM" approach, solving for all camera poses simultaneously rather than incrementally.
 
@@ -16,26 +17,10 @@ This document outlines the high-level pipeline of InstantSFM. It follows a "Glob
         *   Creates a graph where nodes are images and edges are matches.
         *   **Filtering:** Applies strict thresholds (min inliers, inlier ratio) to discard weak connections.
         *   **Connectivity Check:** Keeps only the "Largest Connected Component" to ensure the graph is not fragmented.
-    *   **Relative Pose Estimation:** 
-        *   Converts raw feature matches into **Relative Poses** (Rotation/Translation) using the Epipolar Constraint (Essential Matrix).
-        *   *Distinction:* The ViewGraph stores **Verified Inliers** (geometrically consistent matches), which is a subset of the "Raw Matches" found in the database.
-*   **Output:** A `ViewGraph` containing thousands of independent, verified pairwise relationships.
+*   **Output:** A `ViewGraph` containing thousands of potential pairwise relationships.
 *   **Code Reference:**
     *   **Orchestrator:** `instantsfm/controllers/global_mapper.py` -> `SolveGlobalMapper`
     *   **Data Loading:** `instantsfm/controllers/data_reader.py` -> `ReadColmapDatabase` (Handles DB read & Rig Grouping)
-    *   **Pose Estimation:** `instantsfm/processors/relpose_estimation.py` -> `EstimateRelativePose` (Computes E/F/H matrices)
-    *   **Filtering:** `instantsfm/processors/relpose_filter.py` -> `FilterInlierNum`, `FilterInlierRatio`
-
-### Phase 1 Diagnostics & Quality Assurance
-Before proceeding to Phase 2, it is critical to validate the ViewGraph quality using `modules/phase_1/scripts/diagnostics/diagnose_viewgraph_phase1.py`.
-
-**Key Metrics to Watch:**
-1.  **Rig Connectivity:** Should be >80% for expected overlapping pairs.
-2.  **Valid Pair Retention:**
-    *   **Raw Drop Rate:** It is normal for ~60-70% of *raw* database pairs to be dropped.
-    *   **Why?** Most raw pairs are `UNDEFINED` (failed geometric verification due to lack of overlap) or `WATERMARK` (zero parallax/static overlay).
-    *   **The Metric that Matters:** Focus on the **Retention Rate of Valid Geometric Pairs** (Config 2-6, 8). This should be high (>75%).
-    *   *Insight:* If `WATERMARK` drops are high, it usually indicates the camera was stationary (zero baseline), which is correctly filtered out to prevent triangulation errors.
 
 ## Phase 2: View Graph Calibration
 *   **Goal:** Refine the camera intrinsics (specifically **Focal Lengths**) to ensure they are consistent with the observed geometry.
@@ -55,31 +40,48 @@ Before proceeding to Phase 2, it is critical to validate the ViewGraph quality u
     *   **Pose Estimation:** 
         *   Computes the **Essential Matrix ($E$)** (or Homography $H$ for planar scenes) using RANSAC.
         *   Decomposes $E$ into relative rotation and translation ($R, t$) using `cv2.recoverPose`.
+        *   **Important:** This step treats every pair **independently**. It does **not** yet enforce rig constraints (fixed relative pose between cameras).
     *   **Filtering:** 
         *   **Inlier Count:** Discards pairs with too few geometrically consistent matches (`FilterInlierNum`).
         *   **Inlier Ratio:** Discards pairs where the ratio of inliers to raw matches is too low (`FilterInlierRatio`).
     *   **Connectivity Check:** Ensures the graph remains a single connected component (`keep_largest_connected_component`). If the graph splits, only the largest group is kept.
 *   **Output:** A robust `ViewGraph` where every edge has a trusted relative pose ($R_{ij}, t_{ij}$).
+    *   **Checkpoint:** `checkpoint_relpose.pkl`
 *   **Code Reference:**
     *   **Orchestrator:** `instantsfm/processors/relpose_estimation.py` -> `EstimateRelativePose`
     *   **Undistortion:** `instantsfm/processors/image_undistortion.py` -> `UndistortImages`
     *   **Filtering:** `instantsfm/processors/relpose_filter.py` -> `FilterInlierNum`, `FilterInlierRatio`
-    *   **Graph Logic:** `instantsfm/scene/defs.py` -> `ViewGraph.keep_largest_connected_component`
-    *   **Checkpoint:** `checkpoint_relpose.pkl` (Saved here if `checkpoint_path` is provided)
+
+### Phase 3 Diagnostics
+Before proceeding, validate the ViewGraph using `modules/phase_1/scripts/diagnostics/diagnose_viewgraph.py`.
+*   **Check:** Ensure the graph is fully connected (1 component).
+*   **Check:** Verify focal lengths are stable (no drift).
+*   **Note:** "Unstable" rig pairs (high deviation) are expected here because rig constraints are not yet enforced.
 
 ## Phase 4: Rotation Averaging
 *   **Goal:** Solve for the global orientation of every camera.
-*   **Action:** Takes all the pairwise rotations (A relative to B, B relative to C) and solves a global optimization problem to find the absolute rotation of A, B, and C in the world.
+*   **Action:** 
+    *   Takes all the pairwise rotations (A relative to B, B relative to C) and solves a global optimization problem (L1/L2 averaging) to find the absolute rotation of every camera in the world frame.
+    *   **Rig Handling:** This phase solves for rotations based on visual evidence. It does **not** strictly enforce the rigid relative poses defined in `rig_config.json`.
 *   **Output:** **Global Rotations** for every camera (but no positions yet).
-    *   **Checkpoint:** `checkpoint_rotation.pkl` (Saved here if `save_rotation_checkpoint_path` is provided)
+    *   **Checkpoint:** `checkpoint_rotation.pkl`
+
+### Phase 4 Diagnostics
+Validate the rotation quality using `modules/phase_1/scripts/diagnostics/diagnose_rotation.py`.
+*   **Internal Consistency:** The most important metric. Check if the *angles between cameras* match the rig configuration (e.g., `analyze_rig_internal_angles`).
+*   **Global Offset:** A systematic deviation (e.g., 90° or 120° error on all pairs) is **normal** and indicates a coordinate system convention difference (World vs Rig frame), not a failure.
+*   **Smoothness:** Check for low angular velocity (~0.02°/frame) to ensure stable tracking.
 
 ## Phase 5: Track Establishment
-*   **Goal:** Build the 3D points.
-*   **Action:** Chains pairwise matches into **Tracks**.
-    *   *Definition:* A Track represents a single physical point seen in multiple images.
-    *   *Example:* If A matches B, and B matches C, create a single Track seen by {A, B, C}.
-*   **Output:** A list of `Tracks` (raw 2D observation chains), ready for triangulation.
-    *   **Checkpoint:** `checkpoint_tracks.pkl` (Saved here if `save_tracks_checkpoint_path` is provided)
+*   **Goal:** Build the 3D points structure by chaining pairwise matches into global tracks.
+*   **Action:**
+    *   **Feature Graph Construction:** Aggregates all verified pairwise matches from the ViewGraph into a massive graph where nodes are individual 2D feature observations and edges are matches.
+    *   **Connected Components (Transitive Closure):** Identifies "Tracks" by finding connected components in this feature graph.
+        *   *Logic:* If Feature A (Image 1) matches Feature B (Image 2), and Feature B matches Feature C (Image 3), they are merged into a single Track {A, B, C}.
+    *   **Deduplication:** Cleans up tracks to ensure a single track does not contain multiple conflicting features from the same image.
+    *   **Length Filtering:** Discards "weak" tracks that appear in too few images (e.g., < 3 observations). This step typically reduces the raw track count by ~50%, keeping only the most reliable points for triangulation.
+*   **Output:** A `Tracks` object containing millions of 2D observation chains, ready for triangulation.
+    *   **Checkpoint:** `checkpoint_tracks.pkl`
 
 ## Phase 6: Global Positioning
 *   **Goal:** Solve for the global position (X, Y, Z) of every camera.
@@ -88,6 +90,7 @@ Before proceeding to Phase 2, it is critical to validate the ViewGraph quality u
     *   **Optimization:** Moves cameras to minimize the error between where they *should* be (based on tracks) and where they *are*.
     *   **Rig Mode:** If multiple cameras per timestamp are detected, `OptimizeMulti` is used to enforce rigid constraints between them, preventing drift in visually disconnected rigs.
 *   **Output:** **Global Positions** for every camera and rough 3D coordinates for the Tracks.
+    *   **Checkpoint:** `checkpoint_gp.pkl`
 *   **Code Reference:**
     *   **Orchestrator:** `instantsfm/processors/global_positioning.py` -> `TorchGP`
     *   **Optimization:** `instantsfm/processors/global_positioning.py` -> `OptimizeMulti` (Rig Mode) / `OptimizeSingle` (Standard)

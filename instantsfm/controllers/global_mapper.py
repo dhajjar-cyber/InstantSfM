@@ -236,6 +236,10 @@ def SolveGlobalMapper(view_graph:ViewGraph, cameras, images, config:Config, dept
         
         log(f'Global positioning took: {time.time() - start_time} seconds')
 
+        save_gp_path = config.OPTIONS.get('save_gp_checkpoint_path')
+        if save_gp_path:
+             save_checkpoint(save_gp_path, view_graph, cameras, images, tracks)
+
     if not config.OPTIONS['skip_bundle_adjustment']:
         print('-------------------------------------')
         log('Running bundle adjustment ...')
