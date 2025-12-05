@@ -28,6 +28,7 @@ def run_sfm():
     parser.add_argument('--save_ba_checkpoint_path', help='Path to save checkpoint after bundle adjustment')
     parser.add_argument('--resume_stage', default='relpose', choices=['relpose', 'rotation', 'tracks', 'gp', 'ba'], help='Stage to resume from (relpose, rotation, tracks, gp, or ba)')
     parser.add_argument('--max_tracks_for_gp', type=int, default=200000, help='Maximum number of tracks to use for global positioning (subsampling)')
+    parser.add_argument('--exclusion_list_path', default=None, help='Path to JSON file containing list of images to exclude from optimization')
     mapper_args = parser.parse_args()
 
     path_info = ReadData(mapper_args.data_path)
@@ -96,6 +97,7 @@ def run_sfm():
     config.OPTIONS['save_gp_checkpoint_path'] = mapper_args.save_gp_checkpoint_path
     config.OPTIONS['save_ba_checkpoint_path'] = mapper_args.save_ba_checkpoint_path
     config.OPTIONS['resume_stage'] = mapper_args.resume_stage
+    config.OPTIONS['exclusion_list_path'] = mapper_args.exclusion_list_path
     
     # If checkpoint was loaded here, set skip flags
     if checkpoint_loaded:

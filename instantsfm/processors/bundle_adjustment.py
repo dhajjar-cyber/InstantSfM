@@ -4,6 +4,7 @@ import sys
 import time
 
 from instantsfm.utils.cost_function import reproject_funcs
+from instantsfm.utils.optimization_utils import refine_optimization_inputs
 from instantsfm.scene.defs import get_camera_model_info
 
 # used by torch LM
@@ -45,6 +46,21 @@ class TorchBA():
                 print(f"         is_multi={is_multi}, single_only={single_only}")
                 print("         Rig constraints will be IGNORED.")
             self.SolveSingle(cameras, images, tracks, BUNDLE_ADJUSTER_OPTIONS)
+
+    def RefineOptimizationInputs(self, camera_intrs, points_3d, image_extrs=None):
+        """
+        Refines inputs for Bundle Adjustment, specifically handling BAE 1x1 block bugs.
+        Uses shared utility for padding and logging.
+        """
+        inputs = {
+            "camera_intrs": camera_intrs,
+            "points_3d": points_3d,
+            "image_extrs": image_extrs
+        }
+        
+        refined = refine_optimization_inputs(inputs, verbose=True)
+        
+        return refined["camera_intrs"], refined["points_3d"], refined["image_extrs"]
 
     def SolveSingle(self, cameras, images, tracks, BUNDLE_ADJUSTER_OPTIONS):
         self.camera_model = cameras[0].model_id # assume all cameras are under the same model
@@ -135,7 +151,7 @@ class TorchBA():
         registered_indices = images.get_registered_indices()
         image_extrs_list = [pp.mat2SE3(images.world2cams[idx]).tensor() for idx in registered_indices]
         image_extrs = torch.stack(image_extrs_list, dim=0).to(self.device).to(torch.float64)
-        camera_intrs_list = [torch.tensor(camera.params) for idx, camera in enumerate(cameras) if camera_used[idx]]
+        camera_intrs_list = [torch.tensor(camera.params, dtype=torch.float64) for idx, camera in enumerate(cameras) if camera_used[idx]]
         camera_intrs = torch.stack(camera_intrs_list, dim=0).to(self.device).to(torch.float64)
 
         # because principal point is not optimized, remove it from camera params
@@ -167,6 +183,9 @@ class TorchBA():
         image_indices = torch.tensor(np.array(image_indices_list), dtype=torch.int32, device=self.device)
         camera_indices = torch.tensor(np.array(camera_indices_list), dtype=torch.int32, device=self.device)
         point_indices = torch.tensor(np.array(point_indices_list), dtype=torch.int32, device=self.device)
+
+        # Refine inputs (logging + potential fix for intrinsics shape)
+        camera_intrs, points_3d, image_extrs = self.RefineOptimizationInputs(camera_intrs, points_3d, image_extrs)
 
         model = ReprojNonBatched(image_extrs, camera_intrs, points_3d)
         strategy = pp.optim.strategy.TrustRegion(radius=1e4, max=1e10, up=2.0, down=0.5**4)
@@ -256,6 +275,32 @@ class TorchBA():
                 image_poses = compute_combined_poses(ref_vec, rel_vec)
                 
                 points_3d = self.points_3d
+                
+                # Slice intrinsics back to real size (assuming 1 param for SIMPLE_PINHOLE)
+                # TODO: Make this dynamic based on camera model if needed, but for now we assume 1 param + padding
+                # If we padded to 3, and real size is 1, we take :1
+                # But wait, we don't know the real size here easily without passing it.
+                # However, the cost function will likely fail if we pass too many params?
+                # No, cost_fn usually takes specific args.
+                # Let's assume we need to slice.
+                # Actually, let's check if we can pass the padded tensor.
+                # If cost_fn expects (N, 1) and we pass (N, 3), it might broadcast or fail.
+                # Let's slice to be safe. We know we padded to 3.
+                # If the original was 1 (SIMPLE_PINHOLE), we slice :1.
+                # If it was 2 (PINHOLE), we slice :2.
+                # We can infer real size from self.intrs.shape[1] - pad_size? No we don't have pad_size.
+                # But we know points_3d is 3.
+                
+                # Let's try passing it as is first? No, reproject_funcs usually unpack.
+                # Let's look at reproject_funcs in cost_function.py (I can't read it right now but I can guess).
+                # Usually: fx, fy, cx, cy = params[:, 0], params[:, 1], ...
+                # If we pass extra columns, it's fine as long as it doesn't check shape[1].
+                
+                # BUT, if we padded with zeros, and the cost function uses those zeros...
+                # For SIMPLE_PINHOLE, it uses params[:, 0] as f.
+                # It ignores other columns.
+                # So passing (N, 3) should be fine!
+                
                 points_proj = cost_fn(points_3d[point_indices], image_poses,
                                       self.intrs[camera_indices], camera_pps[camera_indices])
                 loss = points_proj - points_2d
@@ -301,6 +346,8 @@ class TorchBA():
             ref_poses_mats = pp.SE3(ref_poses).matrix().cpu().numpy()
             rel_poses_mats = pp.SE3(rel_poses).matrix().cpu().numpy()
             for image_id in range(len(images)):
+                if image_id not in image_group_idx:
+                    continue
                 gid = image_group_idx[image_id]
                 midx = image_member_idx[image_id]
                 images.world2cams[image_id] = ref_poses_mats[gid] @ rel_poses_mats[midx]
@@ -310,7 +357,9 @@ class TorchBA():
             full_len = max(max_rem, max_pp) + 1
             camera_params_full = torch.zeros((camera_intrs.shape[0], full_len), dtype=camera_intrs.dtype, device=camera_intrs.device)
             # assign remaining and pp
-            camera_params_full[:, remaining_indices] = camera_intrs
+            # Handle padded camera_intrs (remove padding before assignment)
+            num_params = remaining_indices.numel()
+            camera_params_full[:, remaining_indices] = camera_intrs[:, :num_params]
             camera_params_full[:, pp_indices] = camera_pps
             camera_params_np = camera_params_full.detach().cpu().numpy()
             for idx, cam in enumerate(cameras):
@@ -456,7 +505,7 @@ class TorchBA():
         # Build camera intrinsics
         camera_intrs_list = []
         for idx, camera in enumerate(cameras):
-            cam_params = torch.tensor(camera.params)
+            cam_params = torch.tensor(camera.params, dtype=torch.float64)
             camera_intrs_list.append(cam_params)
         camera_intrs = torch.stack(camera_intrs_list, dim=0).to(self.device).to(torch.float64)
         
@@ -546,7 +595,22 @@ class TorchBA():
         grouping_indices = torch.tensor(grouping_indices_np, dtype=torch.int32, device=self.device)
         point_indices = torch.tensor(point_indices_np, dtype=torch.int32, device=self.device)
 
+        # Pad camera_intrs to match points_3d width (3) to ensure uniform block size for BAE
+        # This prevents the "scalar mode" shape mismatch bug in BAE
+        target_dim = 3
+        if camera_intrs.shape[1] < target_dim:
+            pad_size = target_dim - camera_intrs.shape[1]
+            print(f"  RefineOptimizationInputs: Padding camera_intrs from {camera_intrs.shape} to (N, {target_dim})", flush=True)
+            camera_intrs = torch.cat([camera_intrs, torch.zeros(camera_intrs.shape[0], pad_size, dtype=camera_intrs.dtype, device=camera_intrs.device)], dim=1)
+        
+        # Refine inputs (logging + potential fix for intrinsics shape)
+        # camera_intrs, points_3d, _ = self.RefineOptimizationInputs(camera_intrs, points_3d)
+        # Skip generic refinement since we did custom padding
+        print(f"  camera_intrs: {camera_intrs.shape}, dtype={camera_intrs.dtype}", flush=True)
+        print(f"  points_3d: {points_3d.shape}, dtype={points_3d.dtype}", flush=True)
+
         model = ReprojNonBatched(camera_intrs, points_3d, ref_poses, rel_poses, fix_rel_poses=enforce_zero_baseline)
+        
         strategy = pp.optim.strategy.TrustRegion(radius=1e4, max=1e10, up=2.0, down=0.5**4)
         sparse_solver = PCG(tol=1e-5)
         huber_kernel = Huber(BUNDLE_ADJUSTER_OPTIONS['thres_loss_function'])

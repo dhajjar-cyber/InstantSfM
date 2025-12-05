@@ -21,9 +21,37 @@ def fetzer_cost(fi, fj, ds):
 
 @map_transform
 def pairwise_cost(points, camera_translations, scales, translations, is_calibrated):
+    """
+    Computes the pairwise cost for global positioning.
+    
+    Args:
+        points: 3D points (N, 3)
+        camera_translations: Camera positions (N, 3)
+        scales: Scene scales (N, 1) or (N, 2)
+        translations: Observed relative translations (N, 3)
+        is_calibrated: Boolean mask for calibrated cameras
+        
+    Note on Scales:
+        The `scales` input may be padded to (N, 2) to work around a BAE library bug 
+        with 1x1 block optimization. If padded, the second component is a dummy 
+        variable that must be included in the computation graph (multiplied by 0) 
+        to satisfy `torch.vmap` vectorization requirements.
+    """
     positions1 = camera_translations
     positions2 = points
-    loss = translations - scales * (positions2 - positions1)
+    
+    # Handle padded scales (N, 2) from BAE workaround
+    # We use the second component with 0.0 weight to ensure vmap sees it as used
+    if scales.shape[-1] == 2:
+        scale_val = scales[..., 0:1]
+        dummy_val = scales[..., 1:2]
+        loss = translations - scale_val * (positions2 - positions1) + 0.0 * dummy_val
+    else:
+        # Fallback for non-padded case (though we force padding now)
+        if scales.dim() == 1:
+            scales = scales.unsqueeze(-1)
+        loss = translations - scales * (positions2 - positions1)
+        
     calibrated_factor = torch.where(is_calibrated, 1.0, 0.5).unsqueeze(-1)
     loss = loss * calibrated_factor
     return loss
@@ -33,8 +61,18 @@ def pairwise_cost(points, camera_translations, scales, translations, is_calibrat
 def reproject_simple_pinhole(points, extrinsics, intrinsics, pp):
     points_proj = rotate_quat(points, extrinsics)
     points_proj = points_proj[..., :2] / points_proj[..., 2].unsqueeze(-1)
-    f = intrinsics[..., -1].unsqueeze(-1)
-    points_proj = points_proj * f + pp
+    
+    # Handle padded intrinsics (N, 2) for BAE workaround
+    # If shape is (N, 2), it means we padded [f] to [f, dummy]
+    if intrinsics.shape[-1] == 2:
+        f = intrinsics[..., 0:1]
+        dummy = intrinsics[..., 1:2]
+        # Use f for projection, add dummy with 0 weight for gradients
+        points_proj = points_proj * f + pp + 0.0 * dummy
+    else:
+        f = intrinsics[..., -1].unsqueeze(-1)
+        points_proj = points_proj * f + pp
+        
     return points_proj
 
 @map_transform

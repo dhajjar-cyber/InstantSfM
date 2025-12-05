@@ -5,6 +5,7 @@ import time
 import gc
 
 from instantsfm.utils.cost_function import pairwise_cost
+from instantsfm.utils.optimization_utils import refine_optimization_inputs
 from instantsfm.scene.defs import Tracks
 
 # used by torch LM
@@ -392,6 +393,57 @@ class TorchGP():
         update(cameras, images, tracks, points_3d, 
                image_idx2id, image_translations)
 
+    def RefineOptimizationInputs(self, translations, grouping_indices, point_indices, is_calibrated, scales, points_3d, ref_trans, rel_trans):
+        """
+        Refines and validates inputs before passing them to the BAE optimizer.
+        Uses shared utility for padding and logging.
+        """
+        # Prepare dictionary for shared utility
+        inputs = {
+            "translations": translations,
+            "grouping_indices": grouping_indices,
+            "point_indices": point_indices,
+            "is_calibrated": is_calibrated,
+            "scales": scales,
+            "points_3d": points_3d,
+            "ref_trans": ref_trans,
+            "rel_trans": rel_trans
+        }
+        
+        # Use shared function for logging and padding (fixes BAE 1x1 bug)
+        refined = refine_optimization_inputs(inputs, verbose=True)
+        
+        # Unpack refined tensors
+        translations = refined["translations"]
+        grouping_indices = refined["grouping_indices"]
+        point_indices = refined["point_indices"]
+        is_calibrated = refined["is_calibrated"]
+        scales = refined["scales"]
+        points_3d = refined["points_3d"]
+        ref_trans = refined["ref_trans"]
+        rel_trans = refined["rel_trans"]
+        
+        # Specific checks for GP
+        if torch.isnan(translations).any(): print("  WARNING: NaNs in translations", flush=True)
+        if torch.isnan(scales).any(): print("  WARNING: NaNs in scales", flush=True)
+        if torch.isnan(points_3d).any(): print("  WARNING: NaNs in points_3d", flush=True)
+        
+        if len(point_indices) > 0:
+            p_max = point_indices.max().item()
+            if p_max >= len(points_3d):
+                print(f"  ERROR: point_indices max ({p_max}) >= points_3d len ({len(points_3d)})", flush=True)
+        
+        if len(grouping_indices) > 0:
+            g_max = grouping_indices[:, 0].max().item()
+            if g_max >= len(ref_trans):
+                print(f"  ERROR: grouping_indices group max ({g_max}) >= ref_trans len ({len(ref_trans)})", flush=True)
+            
+            m_max = grouping_indices[:, 1].max().item()
+            if m_max >= len(rel_trans):
+                print(f"  ERROR: grouping_indices member max ({m_max}) >= rel_trans len ({len(rel_trans)})", flush=True)
+
+        return translations, grouping_indices, point_indices, is_calibrated, scales, points_3d, ref_trans, rel_trans
+
     def OptimizeMulti(self, cameras, images, tracks, depths, GLOBAL_POSITIONER_OPTIONS):
         cost_fn = pairwise_cost
         class PairwiseNonBatched(nn.Module):
@@ -430,10 +482,13 @@ class TorchGP():
         @torch.no_grad()
         def update(cameras, images, tracks, points_3d, 
                    image_idx2id, image_group_idx, image_member_idx, 
-                   ref_trans, rel_trans):
+                   ref_trans, rel_trans, unique_track_ids=None):
             points_3d_np = points_3d.detach().cpu().numpy()
             # Batch update track xyzs
-            tracks.xyzs[:] = points_3d_np
+            if unique_track_ids is not None:
+                tracks.xyzs[unique_track_ids] = points_3d_np
+            else:
+                tracks.xyzs[:] = points_3d_np
             
             # fetch group refs & rel_trans from model and construct per-image translations
             ref_trans_np = ref_trans.detach().cpu().numpy()
@@ -674,7 +729,23 @@ class TorchGP():
         midxs_flat = img_to_midx[image_ids_flat]
         
         grouping_indices_np = np.column_stack([gids_flat, midxs_flat])
-        point_indices_np = all_track_ids
+        
+        # FIX: Remap point indices to be contiguous and remove unobserved points
+        # This prevents structural zeros on the diagonal which triggers a bug in bae
+        unique_track_ids, inverse_indices = np.unique(all_track_ids, return_inverse=True)
+        point_indices_np = inverse_indices
+        
+        # Update points_3d to match the new indices
+        unique_track_ids_tensor = torch.tensor(unique_track_ids, dtype=torch.long, device=self.device)
+        points_3d = points_3d[unique_track_ids_tensor]
+        
+        # FIX: Remap point indices to be contiguous and remove unobserved points
+        # This prevents structural zeros on the diagonal which triggers a bug in bae
+        unique_track_ids, inverse_indices = np.unique(all_track_ids, return_inverse=True)
+        point_indices_np = inverse_indices
+        
+        # Update points_3d to match the new indices
+        points_3d = torch.tensor(tracks.xyzs[unique_track_ids], dtype=torch.float64, device=self.device)
 
         print(f"Vectorization complete in {time.time() - start_vec:.4f}s. Processing {len(translations_np)} observations.", flush=True)
 
@@ -698,6 +769,10 @@ class TorchGP():
         # Clear memory
         gc.collect()
         torch.cuda.empty_cache()
+
+        # Refine inputs (logging + potential fix for scales shape)
+        translations, grouping_indices, point_indices, is_calibrated, scales, points_3d, ref_trans, rel_trans = \
+            self.RefineOptimizationInputs(translations, grouping_indices, point_indices, is_calibrated, scales, points_3d, ref_trans, rel_trans)
 
         model = PairwiseNonBatched(points_3d, scales, ref_trans, rel_trans, scale_indices=scale_indices, fix_rel_trans=enforce_zero_baseline)
         strategy = pp.optim.strategy.TrustRegion(radius=1e3, max=1e8, up=2.0, down=0.5**4)
@@ -742,9 +817,14 @@ class TorchGP():
             if self.visualizer:
                 update(cameras, images, tracks, model.points_3d, 
                        image_idx2id, image_group_idx, image_member_idx,
-                       model.ref_trans, model.rel_trans)
+                       model.ref_trans, model.rel_trans, unique_track_ids)
                 self.visualizer.add_step(cameras, images, tracks, "global_positioning")
             
+        # Update tracks with remapped indices
+        # We need to map the optimized points back to the original track indices
+        optimized_points = model.points_3d.detach().cpu().numpy()
+        tracks.xyzs[unique_track_ids] = optimized_points
+
         update(cameras, images, tracks, model.points_3d, 
                image_idx2id, image_group_idx, image_member_idx,
-               model.ref_trans, model.rel_trans)
+               model.ref_trans, model.rel_trans, unique_track_ids)

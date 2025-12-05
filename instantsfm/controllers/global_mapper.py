@@ -54,6 +54,8 @@ def load_checkpoint(path):
         log(f"Error loading checkpoint from {path}: {e}")
         return None, None, None, None
 
+import json
+
 def SolveGlobalMapper(view_graph:ViewGraph, cameras, images, config:Config, depths=None, visualizer=None, tracks=None):    
     # Set PyTorch memory configuration to avoid fragmentation
     os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
@@ -91,6 +93,40 @@ def SolveGlobalMapper(view_graph:ViewGraph, cameras, images, config:Config, dept
         else:
             log("Error: Failed to load checkpoint file.")
             exit(1)
+
+    # --- EXCLUSION LIST HANDLING (Moved after resume) ---
+    exclusion_file = config.OPTIONS.get('exclusion_list_path')
+    if exclusion_file and os.path.exists(exclusion_file):
+        try:
+            with open(exclusion_file, 'r') as f:
+                exclusion_data = json.load(f)
+                excluded_names = set(exclusion_data.get("exclusions", []))
+                
+            if excluded_names:
+                log(f"Found {len(excluded_names)} images in exclusion list: {exclusion_file}")
+                count_excluded = 0
+                
+                # Map filenames to IDs for faster lookup
+                name_to_id = {name: i for i, name in enumerate(images.filenames)}
+                
+                for name in excluded_names:
+                    if name in name_to_id:
+                        img_id = name_to_id[name]
+                        if images.is_registered[img_id]:
+                            images.is_registered[img_id] = False
+                            count_excluded += 1
+                            log(f"  -> Excluding image: {name} (ID: {img_id})")
+                        else:
+                            log(f"  -> Image {name} already unregistered.")
+                    else:
+                        log(f"  -> Warning: Excluded image {name} not found in dataset.")
+                
+                log(f"Successfully excluded {count_excluded} images from optimization.")
+        except Exception as e:
+            log(f"Error reading exclusion list: {e}")
+    elif exclusion_file:
+        log(f"Warning: Exclusion list path provided but file not found: {exclusion_file}")
+    # -------------------------------
 
     if not config.OPTIONS['skip_preprocessing']:
         print('-------------------------------------')

@@ -104,6 +104,13 @@ Validate the rotation quality using `modules/phase_1/scripts/diagnostics/diagnos
         *   Updates global coordinates in the `images` and `tracks` objects.
         *   Normalizes the reconstruction (centers and scales the scene).
         *   Filters tracks based on triangulation angles to remove unstable points.
+    *   **5. Exclusion Feature:**
+        *   **Purpose:** To handle problematic cameras (e.g., those causing trajectory jumps due to reflections) by excluding them from the optimization process.
+        *   **Mechanism:**
+            *   Reads a JSON file specified by `--exclusion_list_path`.
+            *   The file should contain a list of image filenames to exclude (e.g., `{"exclusions": ["R0C0/image1.jpg", ...]}`).
+            *   Sets `is_registered=False` for these images before optimization begins, effectively removing them from the reconstruction.
+        *   **Automation:** The `diagnose_gp.py` script can automatically populate this list by detecting trajectory jumps.
 *   **Output:** **Global Positions** for every camera and rough 3D coordinates for the Tracks.
     *   **Checkpoint:** `checkpoint_gp.pkl`
 *   **Code Reference:**
