@@ -153,13 +153,34 @@ class Reconstruction:
         color_counts = np.zeros(len(self.tracks), dtype=np.int32)
         
         # Process each image
+        debug_printed = False
         for idx in self._selected_indices:
             filename = self.images.filenames[idx]
-            if filename is None or not os.path.exists(os.path.join(image_path, filename)):
+            full_path = os.path.join(image_path, filename)
+            
+            if filename is not None and not os.path.exists(full_path):
+                # Try alternative naming convention: folder/name_folder.ext
+                folder, name = os.path.split(filename)
+                base, ext = os.path.splitext(name)
+                alt_name = f"{base}_{folder}{ext}"
+                alt_path = os.path.join(image_path, folder, alt_name)
+                
+                if not debug_printed:
+                     print(f"DEBUG: Checking alt_path: {alt_path}")
+                
+                if os.path.exists(alt_path):
+                    full_path = alt_path
+            
+            if filename is None or not os.path.exists(full_path):
+                if not debug_printed:
+                    print(f"DEBUG: Image not found: {full_path}")
+                    print(f"DEBUG: image_path: {image_path}")
+                    print(f"DEBUG: filename: {filename}")
+                    debug_printed = True
                 continue
             
             # Load image
-            bitmap = cv2.imread(os.path.join(image_path, filename))
+            bitmap = cv2.imread(full_path)
             bitmap = cv2.cvtColor(bitmap, cv2.COLOR_BGR2RGB)
             
             # Get valid correspondences for this image

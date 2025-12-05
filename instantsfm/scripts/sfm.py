@@ -14,6 +14,7 @@ def run_sfm():
     print("DEBUG: Running modified sfm.py from workspace")
     parser = ArgumentParser()
     parser.add_argument('--data_path', required=True, help='Path to the data folder')
+    parser.add_argument('--image_path', default=None, help='Path to the images folder (overrides data_path detection)')
     parser.add_argument('--enable_gui', action='store_true', help='Enable GUI for visualization')
     parser.add_argument('--record_recon', action='store_true', help='Save reconstruction data at each step')
     parser.add_argument('--record_path', default=None, help='Path to save the recorded reconstruction data')
@@ -32,6 +33,10 @@ def run_sfm():
     mapper_args = parser.parse_args()
 
     path_info = ReadData(mapper_args.data_path)
+    if mapper_args.image_path:
+        path_info.image_path = mapper_args.image_path
+        print(f"Overriding image path to: {path_info.image_path}")
+
     if not path_info:
         print('Invalid data path, please check the provided path')
         return
