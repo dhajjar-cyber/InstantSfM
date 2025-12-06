@@ -36,6 +36,8 @@ def pairwise_cost(points, camera_translations, scales, translations, is_calibrat
         with 1x1 block optimization. If padded, the second component is a dummy 
         variable that must be included in the computation graph (multiplied by 0) 
         to satisfy `torch.vmap` vectorization requirements.
+        
+        See: `instantsfm/utils/optimization_utils.py::refine_optimization_inputs`
     """
     positions1 = camera_translations
     positions2 = points
@@ -45,6 +47,8 @@ def pairwise_cost(points, camera_translations, scales, translations, is_calibrat
     if scales.shape[-1] == 2:
         scale_val = scales[..., 0:1]
         dummy_val = scales[..., 1:2]
+        # IMPORTANT: + 0.0 * dummy_val is required for autograd to track the dummy variable
+        # This ensures the Jacobian has the correct shape (N, 3, 2) instead of failing
         loss = translations - scale_val * (positions2 - positions1) + 0.0 * dummy_val
     else:
         # Fallback for non-padded case (though we force padding now)

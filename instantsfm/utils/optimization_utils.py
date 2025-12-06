@@ -41,10 +41,24 @@ def refine_optimization_inputs(inputs_dict, verbose=True):
             print(f"  {name}: {tensor.shape}, dtype={tensor.dtype}", flush=True)
         
         # Fix: Pad to (N, 2) if (N, 1)
-        # if tensor.dim() == 2 and tensor.shape[1] == 1:
-        #     if verbose:
-        #         print(f"  RefineOptimizationInputs: Padding {name} from (N, 1) to (N, 2)", flush=True)
-        #     tensor = torch.cat([tensor, torch.zeros_like(tensor)], dim=1)
+        # ==================================================================================
+        # WORKAROUND: BAE Library Bug with 1x1 Blocks (Scalar Parameters)
+        # ==================================================================================
+        # The BAE autograd engine (specifically `torch.vmap` in `bae/autograd/graph.py`) 
+        # fails to correctly vectorize Jacobians for parameters with shape (N, 1).
+        # It triggers: "AssertionError: `func` is not properly vectorized in `torch.vmap`"
+        #
+        # Solution: We pad these tensors to (N, 2). The second column acts as a "dummy" 
+        # variable. This forces the block size to be > 1, bypassing the buggy code path.
+        #
+        # Cross-Reference: 
+        # - See `instantsfm/utils/cost_function.py::pairwise_cost` for how this padded 
+        #   input is handled (using the dummy variable with 0 weight).
+        # ==================================================================================
+        if tensor.dim() == 2 and tensor.shape[1] == 1:
+            if verbose:
+                print(f"  RefineOptimizationInputs: Padding {name} from (N, 1) to (N, 2) [BAE Workaround]", flush=True)
+            tensor = torch.cat([tensor, torch.zeros_like(tensor)], dim=1)
             
         refined_inputs[name] = tensor
         
