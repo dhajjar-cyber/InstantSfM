@@ -154,7 +154,13 @@ class Reconstruction:
         
         # Process each image
         debug_printed = False
-        for idx in self._selected_indices:
+        total_images = len(self._selected_indices)
+        print(f"Extracting colors from {total_images} images...")
+        
+        for i, idx in enumerate(self._selected_indices):
+            if i % 100 == 0:
+                print(f"  Processing image {i}/{total_images} ({i/total_images*100:.1f}%)")
+            
             filename = self.images.filenames[idx]
             full_path = os.path.join(image_path, filename)
             
@@ -240,8 +246,14 @@ class Reconstruction:
         with open(filepath, "wb") as fid:
             write_next_bytes(fid, len(self._selected_indices), "Q")
             
+            total_images = len(self._selected_indices)
+            print(f"Writing {total_images} images to binary...")
+            
             # Batch extract rotation and translation
-            for idx in self._selected_indices:
+            for i, idx in enumerate(self._selected_indices):
+                if i % 500 == 0:
+                    print(f"  Writing image {i}/{total_images} ({i/total_images*100:.1f}%)")
+                
                 img_id = self.images.ids[idx]
                 world2cam = self.images.world2cams[idx]
                 
@@ -281,7 +293,13 @@ class Reconstruction:
         with open(filepath, "wb") as fid:
             write_next_bytes(fid, len(self.tracks), "Q")
             
+            total_tracks = len(self.tracks)
+            print(f"Writing {total_tracks} 3D points to binary...")
+            
             for track_id in range(len(self.tracks)):
+                if track_id % 50000 == 0:
+                    print(f"  Writing point {track_id}/{total_tracks} ({track_id/total_tracks*100:.1f}%)")
+                
                 xyz = self.tracks.xyzs[track_id]
                 color = self.tracks.colors[track_id]
                 obs = self.tracks.observations[track_id]

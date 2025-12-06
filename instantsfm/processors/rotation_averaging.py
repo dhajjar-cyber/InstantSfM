@@ -53,6 +53,16 @@ class RotationEstimator:
         registered_mask = images.is_registered
         self.images = {image_id: image for image_id, image in enumerate(images) if registered_mask[image_id]}
         
+        # DEBUG: Check if Debug Images survived to Phase 4
+        debug_ids_str = os.environ.get("DEBUG_IMAGE_IDS", "")
+        debug_ids = [int(x) for x in debug_ids_str.split(",")] if debug_ids_str else []
+        
+        for dbg_id in debug_ids:
+            if dbg_id in self.images:
+                print(f"[DEBUG] Phase 4: Image {dbg_id} is REGISTERED and included in Rotation Averaging.")
+            else:
+                print(f"[DEBUG] Phase 4: Image {dbg_id} is NOT REGISTERED. Dropped before Phase 4.")
+
         # Filter valid pairs
         valid_pairs = [p for p in view_graph.image_pairs.values() if p.is_valid]
         

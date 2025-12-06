@@ -262,6 +262,17 @@ class TrackEngine:
         
         self.log(f"Kept {len(final_track_ids)} observations after length filtering.")
 
+        # DEBUG: Check for Debug Images
+        debug_ids_str = os.environ.get("DEBUG_IMAGE_IDS", "")
+        debug_ids = [int(x) for x in debug_ids_str.split(",")] if debug_ids_str else []
+        
+        for dbg_id in debug_ids:
+            count = np.count_nonzero(final_image_ids == dbg_id)
+            if count > 0:
+                print(f"[DEBUG] Phase 5: Image {dbg_id} has {count} observations in valid tracks.")
+            else:
+                print(f"[DEBUG] Phase 5: Image {dbg_id} has NO observations in valid tracks.")
+
         # 4. Build Dictionary
         self.log("Building final dictionary...")
         

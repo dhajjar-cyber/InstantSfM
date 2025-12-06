@@ -41,11 +41,21 @@ def FilterRotations(view_graph:ViewGraph, images, max_angle):
 
 def _check_inlier_num(args):
     pair, min_inlier_num = args
+    
+    # DEBUG LOGGING
+    debug_ids_str = os.environ.get("DEBUG_IMAGE_IDS", "")
+    debug_ids = [int(x) for x in debug_ids_str.split(",")] if debug_ids_str else []
+    is_debug = pair.image_id1 in debug_ids or pair.image_id2 in debug_ids
+
     if not pair.is_valid:
+        if is_debug: print(f"[DEBUG] FilterInlierNum Pair {pair.image_id1}-{pair.image_id2} ALREADY INVALID")
         return 0
     if len(pair.inliers) < min_inlier_num:
+        if is_debug: print(f"[DEBUG] FilterInlierNum Pair {pair.image_id1}-{pair.image_id2} FAILED: {len(pair.inliers)} < {min_inlier_num}")
         pair.is_valid = False
         return 1
+    
+    if is_debug: print(f"[DEBUG] FilterInlierNum Pair {pair.image_id1}-{pair.image_id2} PASSED: {len(pair.inliers)} >= {min_inlier_num}")
     return 0
 
 def FilterInlierNum(view_graph:ViewGraph, min_inlier_num):
@@ -64,13 +74,26 @@ def FilterInlierNum(view_graph:ViewGraph, min_inlier_num):
 
 def _check_inlier_ratio(args):
     pair, min_inlier_ratio = args
+    
+    # DEBUG LOGGING
+    debug_ids_str = os.environ.get("DEBUG_IMAGE_IDS", "")
+    debug_ids = [int(x) for x in debug_ids_str.split(",")] if debug_ids_str else []
+    is_debug = pair.image_id1 in debug_ids or pair.image_id2 in debug_ids
+
     if not pair.is_valid:
+        if is_debug: print(f"[DEBUG] FilterInlierRatio Pair {pair.image_id1}-{pair.image_id2} ALREADY INVALID")
         return 0
     if len(pair.matches) == 0:
+        if is_debug: print(f"[DEBUG] FilterInlierRatio Pair {pair.image_id1}-{pair.image_id2} FAILED: 0 matches")
         return 0
-    if len(pair.inliers) / len(pair.matches) < min_inlier_ratio:
+    
+    ratio = len(pair.inliers) / len(pair.matches)
+    if ratio < min_inlier_ratio:
+        if is_debug: print(f"[DEBUG] FilterInlierRatio Pair {pair.image_id1}-{pair.image_id2} FAILED: {ratio:.3f} < {min_inlier_ratio}")
         pair.is_valid = False
         return 1
+    
+    if is_debug: print(f"[DEBUG] FilterInlierRatio Pair {pair.image_id1}-{pair.image_id2} PASSED: {ratio:.3f} >= {min_inlier_ratio}")
     return 0
 
 def FilterInlierRatio(view_graph:ViewGraph, min_inlier_ratio):

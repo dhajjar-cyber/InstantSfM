@@ -57,6 +57,10 @@ class TorchGP():
         visited = set([root])
         queue = [root]
         
+        # DEBUG: Track Debug Images
+        debug_ids_str = os.environ.get("DEBUG_IMAGE_IDS", "")
+        debug_ids = set([int(x) for x in debug_ids_str.split(",")]) if debug_ids_str else set()
+        
         # Set root to origin (or keep its current random/zero if we want)
         # Actually, we should respect the rotation.
         # t_j = t_ij + R_ij * t_i
@@ -64,6 +68,9 @@ class TorchGP():
         
         while queue:
             u = queue.pop(0)
+            
+            if u in debug_ids:
+                print(f"[DEBUG] Phase 6: Image {u} VISITED in BFS initialization.")
             
             # Current global pose
             # R_u = images.world2cams[u, :3, :3]

@@ -37,27 +37,46 @@ def estimate_pair_relative_pose_poselib(pair, cameras, images):
     pair.inliers = inliers'''
 
 def estimate_pair_relative_pose_opencv(pair, cameras, images):
+    # DEBUG LOGGING
+    debug_ids_str = os.environ.get("DEBUG_IMAGE_IDS", "")
+    debug_ids = [int(x) for x in debug_ids_str.split(",")] if debug_ids_str else []
+    is_debug = pair.image_id1 in debug_ids or pair.image_id2 in debug_ids
+    
     if pair.config not in [ConfigurationType.PLANAR, ConfigurationType.PANORAMIC, ConfigurationType.PLANAR_OR_PANORAMIC, ConfigurationType.UNCALIBRATED, ConfigurationType.CALIBRATED]:
+        if is_debug: print(f"[DEBUG] Pair {pair.image_id1}-{pair.image_id2} INVALID CONFIG: {pair.config}")
         pair.is_valid = False
         return
+
+    # FORCE UNCALIBRATED: Ignore COLMAP's geometric classification.
+    # We need to find a valid 3D relative pose (E/F) for recoverPose to work.
+    # Treating pairs as PLANAR/PANORAMIC but feeding them to recoverPose(E) causes failure.
+    if pair.config in [ConfigurationType.PLANAR, ConfigurationType.PANORAMIC, ConfigurationType.PLANAR_OR_PANORAMIC]:
+        if is_debug: print(f"[DEBUG] Pair {pair.image_id1}-{pair.image_id2} Overriding config {pair.config} -> UNCALIBRATED")
+        pair.config = ConfigurationType.UNCALIBRATED
+
     image_id1, image_id2 = pair.image_id1, pair.image_id2
     image1 = images[image_id1]
     image2 = images[image_id2]
     cam1 = cameras[image1.cam_id]
     cam2 = cameras[image2.cam_id]
     matches = pair.matches
+    
+    if is_debug: print(f"[DEBUG] Pair {pair.image_id1}-{pair.image_id2} START. Matches: {len(matches)} Config: {pair.config}")
+
     points2d1 = image1.features[matches[:, 0]]
     points2d2 = image2.features[matches[:, 1]]
     points2d1_norm = cam1.img2cam(points2d1)
     points2d2_norm = cam2.img2cam(points2d2)
     E, E_mask = cv2.findEssentialMat(points2d1_norm, points2d2_norm, method=cv2.RANSAC, threshold=0.001)
     if E is None or E.shape != (3, 3):
+        if is_debug: print(f"[DEBUG] Pair {pair.image_id1}-{pair.image_id2} FAILED Essential Matrix")
         pair.is_valid = False
         return
     if pair.config == ConfigurationType.UNCALIBRATED:
         F, F_mask = cv2.findFundamentalMat(points2d1, points2d2, method=cv2.FM_RANSAC)
         pair.F = F
         if F is None or F.shape != (3, 3):
+            if is_debug: print(f"[DEBUG] Pair {pair.image_id1}-{pair.image_id2} FAILED Fundamental Matrix")
             pair.is_valid = False
             return
         mask = F_mask
@@ -67,11 +86,14 @@ def estimate_pair_relative_pose_opencv(pair, cameras, images):
         H, H_mask = cv2.findHomography(points2d1, points2d2, method=cv2.RANSAC)
         pair.H = H
         if H is None or H.shape != (3, 3):
+            if is_debug: print(f"[DEBUG] Pair {pair.image_id1}-{pair.image_id2} FAILED Homography")
             pair.is_valid = False
             return
         mask = H_mask
 
     inliers = np.where(mask.ravel())[0]
+    if is_debug: print(f"[DEBUG] Pair {pair.image_id1}-{pair.image_id2} Geometric Inliers: {len(inliers)}")
+
     points2d1_norm = points2d1_norm[inliers]
     points2d2_norm = points2d2_norm[inliers]
     inlier_num, R_mat, t, mask = cv2.recoverPose(E, points2d1_norm, points2d2_norm)
@@ -79,6 +101,8 @@ def estimate_pair_relative_pose_opencv(pair, cameras, images):
     pair.translation = t.flatten()
     pair.E = E
     pair.inliers = inliers[np.where(mask.ravel())[0]] # inliers
+    
+    if is_debug: print(f"[DEBUG] Pair {pair.image_id1}-{pair.image_id2} Final Inliers (Cheirality): {len(pair.inliers)}")
 
 import sys
 
