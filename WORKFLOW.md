@@ -151,3 +151,17 @@ You can reuse the Global Positioning diagnostics script to validate the final Bu
 *   **Goal:** Fill in missing details.
 *   **Action:** Uses the now-perfect camera poses to look for tracks that were missed or discarded earlier and adds them back in.
 *   **Output:** A denser point cloud.
+
+## Phase 9: Reconstruction Export & Coloring
+*   **Goal:** Convert the internal memory representation into standard formats (COLMAP binary/text) and generate point colors.
+*   **Action:**
+    *   **Filtering:** Filters out unregistered images or specific clusters.
+    *   **Color Extraction:** This is the **ONLY** phase that reads the actual RGB images from disk.
+        *   Iterates through registered images.
+        *   Performs bilinear interpolation at the 2D feature coordinates to sample the RGB color.
+        *   Averages the colors from all observations of a track to assign a final RGB value to the 3D point.
+    *   **Writing:** Serializes the data into COLMAP sparse format.
+*   **Output:** `cameras.bin`, `images.bin`, `points3D.bin` (with colored points).
+*   **Code Reference:**
+    *   **Writer:** `instantsfm/controllers/reconstruction_writer.py` -> `WriteGlomapReconstruction`
+    *   **Coloring:** `instantsfm/scene/reconstruction.py` -> `extract_colors_batch`

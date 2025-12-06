@@ -2,6 +2,7 @@ import numpy as np
 import torch
 import tqdm
 import pyceres
+import os
 
 from instantsfm.scene.defs import ConfigurationType, ViewGraph
 from instantsfm.utils.cost_function import FetzerFocalLengthCostFunction, FetzerFocalLengthSameCameraCostFunction, fetzer_ds, fetzer_cost
@@ -66,6 +67,11 @@ def SolveViewGraphCalibration(view_graph:ViewGraph, cameras, images, VIEW_GRAPH_
     print(f"Added {single_cam_residuals} single-camera residuals and {two_cam_residuals} two-camera residuals.")
     problem.set_parameter_lower_bound(focals, 0, 1e-3)
 
+    # Fix: Respect prior focal lengths
+    for idx, cam in enumerate(cameras):
+        if cam.has_prior_focal_length:
+            problem.set_parameter_block_constant(focals[idx:idx+1])
+
     options.max_num_iterations = VIEW_GRAPH_CALIBRATOR_OPTIONS['max_num_iterations']
     options.function_tolerance = VIEW_GRAPH_CALIBRATOR_OPTIONS['function_tolerance']
     # options.minimizer_progress_to_stdout = True
@@ -95,13 +101,31 @@ def SolveViewGraphCalibration(view_graph:ViewGraph, cameras, images, VIEW_GRAPH_
     thres_two_view_error_sq = VIEW_GRAPH_CALIBRATOR_OPTIONS['thres_two_view_error'] ** 2
 
     # manually calculate the residuals
+    debug_ids_str = os.environ.get("DEBUG_IMAGE_IDS", "")
+    debug_ids = [int(x) for x in debug_ids_str.split(",")] if debug_ids_str else []
+
     for idx, (pair_id, image_pair) in enumerate(valid_image_pairs.items()):
         residual = residuals[2 * idx:2 * idx + 2]
-        cost_function.Evaluate([cam1.focal_length, cam2.focal_length], residuals, None)
+        
+        # Debug logging for specific IDs
+        image1, image2 = images[image_pair.image_id1], images[image_pair.image_id2]
+        id1, id2 = image1.id, image2.id
+        
+        is_debug_pair = (id1 in debug_ids and id2 in debug_ids)
+        
         if residual[0]**2 + residual[1]**2 > thres_two_view_error_sq:
             invalid_counter += 1
             image_pair.is_valid = False
             view_graph.image_pairs[pair_id].is_valid = False
+            
+            if is_debug_pair or id1 in debug_ids or id2 in debug_ids:
+                print(f"[DEBUG-DROP] Dropping edge {id1}-{id2}. Residual: {residual[0]:.4f}, {residual[1]:.4f} (SqSum: {residual[0]**2 + residual[1]**2:.4f} > {thres_two_view_error_sq})")
+                cam1, cam2 = cameras[image1.cam_id], cameras[image2.cam_id]
+                print(f"    Cam {id1} Focal: {cam1.focal_length[0]:.4f} (Prior: {cam1.has_prior_focal_length})")
+                print(f"    Cam {id2} Focal: {cam2.focal_length[0]:.4f} (Prior: {cam2.has_prior_focal_length})")
+        elif is_debug_pair:
+             print(f"[DEBUG-KEEP] Keeping edge {id1}-{id2}. Residual: {residual[0]:.4f}, {residual[1]:.4f}")
+
     print(f'invalid / total number of two view geometry: {invalid_counter} / {len(valid_image_pairs)}')
 
 class TorchVGC():

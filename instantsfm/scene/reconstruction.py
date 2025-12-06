@@ -213,17 +213,27 @@ class Reconstruction:
         
         print(f'Extracted colors for {np.sum(valid_mask)} / {len(self.tracks)} tracks')
     
-    def write_binary(self, path):
-        """Write reconstruction in COLMAP binary format using batch operations."""
+    def write_binary(self, path, db_id_map=None):
+        """Write reconstruction in COLMAP binary format using batch operations.
+        
+        Args:
+            path: Output directory
+            db_id_map: Optional dict mapping filename -> original DB ID
+        """
         self._write_cameras_binary(os.path.join(path, 'cameras.bin'))
-        self._write_images_binary(os.path.join(path, 'images.bin'))
-        self._write_points3d_binary(os.path.join(path, 'points3D.bin'))
+        self._write_images_binary(os.path.join(path, 'images.bin'), db_id_map)
+        self._write_points3d_binary(os.path.join(path, 'points3D.bin'), db_id_map)
     
-    def write_text(self, path):
-        """Write reconstruction in COLMAP text format using batch operations."""
+    def write_text(self, path, db_id_map=None):
+        """Write reconstruction in COLMAP text format using batch operations.
+        
+        Args:
+            path: Output directory
+            db_id_map: Optional dict mapping filename -> original DB ID
+        """
         self._write_cameras_text(os.path.join(path, 'cameras.txt'))
-        self._write_images_text(os.path.join(path, 'images.txt'))
-        self._write_points3d_text(os.path.join(path, 'points3D.txt'))
+        self._write_images_text(os.path.join(path, 'images.txt'), db_id_map)
+        self._write_points3d_text(os.path.join(path, 'points3D.txt'), db_id_map)
     
     def _write_cameras_binary(self, filepath):
         """Write cameras in binary format."""
@@ -238,7 +248,7 @@ class Reconstruction:
                 for p in cam.params:
                     write_next_bytes(fid, float(p), "d")
     
-    def _write_images_binary(self, filepath):
+    def _write_images_binary(self, filepath, db_id_map=None):
         """Write images in binary format using batch operations."""
         if self.images is None or self._selected_indices is None:
             return
@@ -255,6 +265,12 @@ class Reconstruction:
                     print(f"  Writing image {i}/{total_images} ({i/total_images*100:.1f}%)")
                 
                 img_id = self.images.ids[idx]
+                filename = self.images.filenames[idx] if hasattr(self.images, 'filenames') else f"{img_id}.jpg"
+                
+                # Use DB ID if map provided
+                if db_id_map and filename in db_id_map:
+                    img_id = db_id_map[filename]
+                
                 world2cam = self.images.world2cams[idx]
                 
                 # Extract pose
@@ -270,7 +286,6 @@ class Reconstruction:
                 write_next_bytes(fid, int(self.images.cam_ids[idx]), "i")
                 
                 # Write filename
-                filename = self.images.filenames[idx] if hasattr(self.images, 'filenames') else f"{img_id}.jpg"
                 for char in filename:
                     write_next_bytes(fid, char.encode("utf-8"), "c")
                 write_next_bytes(fid, b"\x00", "c")
@@ -285,11 +300,21 @@ class Reconstruction:
                 for xy, p3d_id in zip(features, valid_point3d_ids):
                     write_next_bytes(fid, [float(xy[0]), float(xy[1]), int(p3d_id)], "ddq")
     
-    def _write_points3d_binary(self, filepath):
+    def _write_points3d_binary(self, filepath, db_id_map=None):
         """Write 3D points in binary format using batch operations."""
         if self.tracks is None:
             return
         
+        # Pre-compute index to DB ID map if needed
+        idx_to_db_id = {}
+        if db_id_map:
+            for idx in range(len(self.images)):
+                fname = self.images.filenames[idx]
+                if fname in db_id_map:
+                    idx_to_db_id[idx] = db_id_map[fname]
+                else:
+                    idx_to_db_id[idx] = self.images.ids[idx]
+
         with open(filepath, "wb") as fid:
             write_next_bytes(fid, len(self.tracks), "Q")
             
@@ -310,8 +335,9 @@ class Reconstruction:
                 write_next_bytes(fid, 0.0, "d")  # error
                 write_next_bytes(fid, len(obs), "Q")
                 
-                for image_id, point2d_id in obs:
-                    write_next_bytes(fid, [int(image_id), int(point2d_id)], "ii")
+                for image_idx, point2d_id in obs:
+                    final_img_id = idx_to_db_id.get(image_idx, image_idx) if db_id_map else image_idx
+                    write_next_bytes(fid, [int(final_img_id), int(point2d_id)], "ii")
     
     def _write_cameras_text(self, filepath):
         """Write cameras in text format."""
@@ -330,7 +356,7 @@ class Reconstruction:
                 line = " ".join([str(elem) for elem in to_write])
                 fid.write(line + "\n")
     
-    def _write_images_text(self, filepath):
+    def _write_images_text(self, filepath, db_id_map=None):
         """Write images in text format using batch operations."""
         if self.images is None or self._selected_indices is None:
             return
@@ -353,6 +379,12 @@ class Reconstruction:
             
             for idx in self._selected_indices:
                 img_id = self.images.ids[idx]
+                filename = self.images.filenames[idx] if hasattr(self.images, 'filenames') else f"{img_id}.jpg"
+                
+                # Use DB ID if map provided
+                if db_id_map and filename in db_id_map:
+                    img_id = db_id_map[filename]
+                
                 world2cam = self.images.world2cams[idx]
                 
                 # Extract pose
@@ -360,7 +392,6 @@ class Reconstruction:
                 qvec = R.from_matrix(world2cam[:3, :3]).as_quat()  # xyzw
                 qvec_colmap = [qvec[3], qvec[0], qvec[1], qvec[2]]  # wxyz
                 
-                filename = self.images.filenames[idx] if hasattr(self.images, 'filenames') else f"{img_id}.jpg"
                 image_header = [img_id, *qvec_colmap, *tvec, int(self.images.cam_ids[idx]), filename]
                 first_line = " ".join(map(str, image_header))
                 fid.write(first_line + "\n")
@@ -374,11 +405,21 @@ class Reconstruction:
                     points_strings.append(" ".join(map(str, [xy[0], xy[1], int(p3d_id)])))
                 fid.write(" ".join(points_strings) + "\n")
     
-    def _write_points3d_text(self, filepath):
+    def _write_points3d_text(self, filepath, db_id_map=None):
         """Write 3D points in text format using batch operations."""
         if self.tracks is None:
             return
         
+        # Pre-compute index to DB ID map if needed
+        idx_to_db_id = {}
+        if db_id_map:
+            for idx in range(len(self.images)):
+                fname = self.images.filenames[idx]
+                if fname in db_id_map:
+                    idx_to_db_id[idx] = db_id_map[fname]
+                else:
+                    idx_to_db_id[idx] = self.images.ids[idx]
+
         # Calculate mean track length
         mean_track_length = 0
         if len(self.tracks) > 0:
@@ -403,6 +444,7 @@ class Reconstruction:
                 fid.write(" ".join(map(str, point_header)) + " ")
                 
                 track_strings = []
-                for image_id, point2d_id in obs:
-                    track_strings.append(" ".join(map(str, [int(image_id), int(point2d_id)])))
+                for image_idx, point2d_id in obs:
+                    final_img_id = idx_to_db_id.get(image_idx, image_idx) if db_id_map else image_idx
+                    track_strings.append(" ".join(map(str, [int(final_img_id), int(point2d_id)])))
                 fid.write(" ".join(track_strings) + "\n")

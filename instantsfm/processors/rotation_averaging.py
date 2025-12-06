@@ -1,5 +1,6 @@
 import numpy as np
 import sys
+import os
 import time
 from scipy.spatial.transform import Rotation as R
 from scipy.sparse import lil_matrix, csc_matrix, diags

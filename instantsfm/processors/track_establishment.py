@@ -2,6 +2,7 @@ from collections import defaultdict
 import numpy as np
 import tqdm
 import sys
+import os
 import time
 from datetime import datetime
 from scipy.sparse import coo_matrix

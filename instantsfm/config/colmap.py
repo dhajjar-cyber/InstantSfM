@@ -15,8 +15,8 @@ CONFIG = {
         'max_epipolar_error_E': 1.,
         'max_epipolar_error_F': 1.5,
         'max_epipolar_error_H': 1.5,
-        'min_inlier_num': 50,
-        'min_inlier_ratio': 0.25,
+        'min_inlier_num': 20,
+        'min_inlier_ratio': 0.15,
         'max_rotation_error': 10.,
     },
     'ROTATION_ESTIMATOR_OPTIONS': {

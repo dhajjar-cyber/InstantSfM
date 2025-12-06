@@ -38,74 +38,78 @@ def FilterRotations(view_graph:ViewGraph, images, max_angle):
     
     num_invalid = sum(results)
     print('Filtered', num_invalid, 'relative rotation with angle >', max_angle, 'degrees')
-
-def _check_inlier_num(args):
-    pair, min_inlier_num = args
     
-    # DEBUG LOGGING
+    # DEBUG: Check if critical pairs survived rotation filtering
     debug_ids_str = os.environ.get("DEBUG_IMAGE_IDS", "")
     debug_ids = [int(x) for x in debug_ids_str.split(",")] if debug_ids_str else []
-    is_debug = pair.image_id1 in debug_ids or pair.image_id2 in debug_ids
-
-    if not pair.is_valid:
-        if is_debug: print(f"[DEBUG] FilterInlierNum Pair {pair.image_id1}-{pair.image_id2} ALREADY INVALID")
-        return 0
-    if len(pair.inliers) < min_inlier_num:
-        if is_debug: print(f"[DEBUG] FilterInlierNum Pair {pair.image_id1}-{pair.image_id2} FAILED: {len(pair.inliers)} < {min_inlier_num}")
-        pair.is_valid = False
-        return 1
     
-    if is_debug: print(f"[DEBUG] FilterInlierNum Pair {pair.image_id1}-{pair.image_id2} PASSED: {len(pair.inliers)} >= {min_inlier_num}")
-    return 0
+    for p in pairs:
+        if p.image_id1 in debug_ids and p.image_id2 in debug_ids:
+            status = "PASSED" if p.is_valid else "FAILED"
+            print(f"[DEBUG] FilterRotations Pair {p.image_id1}-{p.image_id2} {status}")
 
 def FilterInlierNum(view_graph:ViewGraph, min_inlier_num):
-    num_invalid = 0
+    print(f"Filtering inlier num (Vectorized)...")
     pairs = list(view_graph.image_pairs.values())
-    num_threads = int(os.environ.get('POSE_ESTIMATION_THREADS', 64))
-    print(f"Filtering inlier num with {num_threads} threads...")
+    
+    # Filter only valid pairs
+    valid_pairs = [p for p in pairs if p.is_valid]
+    if not valid_pairs:
+        return
 
-    args_list = [(pair, min_inlier_num) for pair in pairs]
+    # Extract counts
+    n_inliers = np.array([len(p.inliers) if p.inliers is not None else 0 for p in valid_pairs])
+    
+    # Filter
+    mask = n_inliers < min_inlier_num
+    
+    # Apply
+    num_invalid = np.count_nonzero(mask)
+    bad_indices = np.where(mask)[0]
+    
+    debug_ids = [253, 1674, 10200]
+    
+    for idx in bad_indices:
+        valid_pairs[idx].is_valid = False
 
-    with ThreadPoolExecutor(max_workers=num_threads) as executor:
-        results = list(tqdm(executor.map(_check_inlier_num, args_list), total=len(pairs), desc="Filtering Inlier Num", file=sys.stdout))
+    # Debug logging
+    for i, p in enumerate(valid_pairs):
+        if p.image_id1 in debug_ids or p.image_id2 in debug_ids:
+            status = "PASSED" if not mask[i] else "FAILED"
+            print(f"[DEBUG] FilterInlierNum Pair {p.image_id1}-{p.image_id2} {status}: {n_inliers[i]} vs {min_inlier_num}")
 
-    num_invalid = sum(results)
     print('Filtered', num_invalid, 'relative pose with inlier number <', min_inlier_num)
 
-def _check_inlier_ratio(args):
-    pair, min_inlier_ratio = args
-    
-    # DEBUG LOGGING
-    debug_ids_str = os.environ.get("DEBUG_IMAGE_IDS", "")
-    debug_ids = [int(x) for x in debug_ids_str.split(",")] if debug_ids_str else []
-    is_debug = pair.image_id1 in debug_ids or pair.image_id2 in debug_ids
-
-    if not pair.is_valid:
-        if is_debug: print(f"[DEBUG] FilterInlierRatio Pair {pair.image_id1}-{pair.image_id2} ALREADY INVALID")
-        return 0
-    if len(pair.matches) == 0:
-        if is_debug: print(f"[DEBUG] FilterInlierRatio Pair {pair.image_id1}-{pair.image_id2} FAILED: 0 matches")
-        return 0
-    
-    ratio = len(pair.inliers) / len(pair.matches)
-    if ratio < min_inlier_ratio:
-        if is_debug: print(f"[DEBUG] FilterInlierRatio Pair {pair.image_id1}-{pair.image_id2} FAILED: {ratio:.3f} < {min_inlier_ratio}")
-        pair.is_valid = False
-        return 1
-    
-    if is_debug: print(f"[DEBUG] FilterInlierRatio Pair {pair.image_id1}-{pair.image_id2} PASSED: {ratio:.3f} >= {min_inlier_ratio}")
-    return 0
-
 def FilterInlierRatio(view_graph:ViewGraph, min_inlier_ratio):
-    num_invalid = 0
+    print(f"Filtering inlier ratio (Vectorized)...")
     pairs = list(view_graph.image_pairs.values())
-    num_threads = int(os.environ.get('POSE_ESTIMATION_THREADS', 64))
-    print(f"Filtering inlier ratio with {num_threads} threads...")
+    
+    valid_pairs = [p for p in pairs if p.is_valid]
+    if not valid_pairs:
+        return
 
-    args_list = [(pair, min_inlier_ratio) for pair in pairs]
+    n_inliers = np.array([len(p.inliers) if p.inliers is not None else 0 for p in valid_pairs])
+    n_matches = np.array([len(p.matches) if p.matches is not None else 0 for p in valid_pairs])
+    
+    with np.errstate(divide='ignore', invalid='ignore'):
+        ratios = n_inliers / n_matches
+    
+    mask = ratios < min_inlier_ratio
+    mask[np.isnan(ratios)] = False # 0 matches -> Valid (or at least not filtered by ratio)
+    
+    num_invalid = np.count_nonzero(mask)
+    bad_indices = np.where(mask)[0]
+    
+    debug_ids = [253, 1674, 10200]
+    
+    for idx in bad_indices:
+        valid_pairs[idx].is_valid = False
+    
+    # Debug logging
+    for i, p in enumerate(valid_pairs):
+        if p.image_id1 in debug_ids or p.image_id2 in debug_ids:
+            status = "PASSED" if not mask[i] else "FAILED"
+            r = ratios[i] if not np.isnan(ratios[i]) else 0.0
+            print(f"[DEBUG] FilterInlierRatio Pair {p.image_id1}-{p.image_id2} {status}: {r:.3f} vs {min_inlier_ratio}")
 
-    with ThreadPoolExecutor(max_workers=num_threads) as executor:
-        results = list(tqdm(executor.map(_check_inlier_ratio, args_list), total=len(pairs), desc="Filtering Inlier Ratio", file=sys.stdout))
-
-    num_invalid = sum(results)
     print('Filtered', num_invalid, 'relative pose with inlier ratio <', min_inlier_ratio)

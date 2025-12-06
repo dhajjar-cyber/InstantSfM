@@ -133,7 +133,8 @@ def run_sfm():
     sys.stdout.flush()
     cameras, images, tracks = SolveGlobalMapper(view_graph, cameras, images, config, depths=depths, visualizer=visualizer, tracks=tracks)
     print('Reconstruction done in', time.time() - start_time, 'seconds')
-    WriteGlomapReconstruction(path_info.output_path, cameras, images, tracks, path_info.image_path, export_txt=mapper_args.export_txt)
+    # Pass database_path to restore original Image IDs during export
+    WriteGlomapReconstruction(path_info.output_path, cameras, images, tracks, path_info.image_path, export_txt=mapper_args.export_txt, database_path=path_info.database_path)
     print('Reconstruction written to', path_info.output_path)
 
     if mapper_args.enable_gui:

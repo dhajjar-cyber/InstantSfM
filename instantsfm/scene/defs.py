@@ -1,6 +1,7 @@
 from queue import Queue
 import numpy as np
 import sys
+import os
 from enum import Enum
 import cv2
 from typing import List, Optional, Dict, Tuple, Union
@@ -1171,17 +1172,34 @@ class ViewGraph:
         print(f"Found {len(self.connected_component)} connected components with sizes: {component_sizes}")
         sys.stdout.flush()
 
+        # DEBUG: Check if Debug Images are being dropped
+        debug_ids_str = os.environ.get("DEBUG_IMAGE_IDS", "")
+        debug_ids = [int(x) for x in debug_ids_str.split(",")] if debug_ids_str else []
+        
         max_idx = -1
         max_img = 0
         for idx, component in enumerate(self.connected_component):
             if len(component) > max_img:
                 max_img = len(component)
                 max_idx = idx
+            
+            # Check if this component contains any debug IDs
+            for dbg_id in debug_ids:
+                if dbg_id in component:
+                    print(f"[DEBUG] Image {dbg_id} is in Component {idx} (Size: {len(component)})")
 
         if max_idx == -1:
             return False
 
         largest_component = self.connected_component[max_idx]
+        print(f"[DEBUG] Keeping Component {max_idx} (Size: {len(largest_component)})")
+        
+        # Warn if debug IDs are in dropped components
+        for idx, component in enumerate(self.connected_component):
+            if idx == max_idx: continue
+            for dbg_id in debug_ids:
+                if dbg_id in component:
+                    print(f"[WARN] DROPPING Image {dbg_id} because it is in Component {idx} (Size: {len(component)})")
         
         for i in range(len(images)):
             img = images[i]

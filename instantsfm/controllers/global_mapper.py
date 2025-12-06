@@ -201,6 +201,15 @@ def SolveGlobalMapper(view_graph:ViewGraph, cameras, images, config:Config, dept
 
         ra_engine.EstimateRotations(view_graph, images, config.ROTATION_ESTIMATOR_OPTIONS, config.L1_SOLVER_OPTIONS)
         FilterRotations(view_graph, images, config.INLIER_THRESHOLD_OPTIONS['max_rotation_error'])
+        
+        # DEBUG: Check pair status before component pruning
+        debug_ids_str = os.environ.get("DEBUG_IMAGE_IDS", "")
+        debug_ids = [int(x) for x in debug_ids_str.split(",")] if debug_ids_str else []
+        
+        for pid, pair in view_graph.image_pairs.items():
+            if pair.image_id1 in debug_ids and pair.image_id2 in debug_ids:
+                print(f"[DEBUG] Pre-Pruning Pair {pair.image_id1}-{pair.image_id2} Valid: {pair.is_valid}")
+
         if not view_graph.keep_largest_connected_component(images):
             print('Failed to keep the largest connected component.')
             sys.stdout.flush()
