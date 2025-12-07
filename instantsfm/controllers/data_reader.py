@@ -14,12 +14,15 @@ from instantsfm.utils.depth_sample import sample_depth_at_pixel
 
 # Global variable for multiprocessing
 _global_images_dict = None
+_global_matches_list = None
 
-def init_worker(shared_dict):
+def init_worker(shared_dict, shared_matches):
     global _global_images_dict
+    global _global_matches_list
     _global_images_dict = shared_dict
+    _global_matches_list = shared_matches
 
-def process_match_chunk(chunk):
+def process_match_chunk(chunk_indices):
     chunk_results = []
     chunk_invalid = 0
     chunk_reasons = {
@@ -30,12 +33,13 @@ def process_match_chunk(chunk):
         'DATA_NONE': 0
     }
     
-    # Access global images dict
-    # In fork mode, this is inherited. In spawn mode, we'd need the initializer.
-    # We'll assume fork or initializer set it.
+    # Access global images dict and matches list
+    # In fork mode, this is inherited.
     global _global_images_dict
+    global _global_matches_list
     
-    for group in chunk:
+    for i in chunk_indices:
+        group = _global_matches_list[i]
         pair_id, data, config, F_blob, E_blob, H_blob = group
         if data is None:
             chunk_invalid += 1
@@ -200,7 +204,11 @@ def ReadColmapDatabase(path):
 
     # Chunk size for parallel processing
     chunk_size = 5000
-    chunks = [matches_list[i:i + chunk_size] for i in range(0, len(matches_list), chunk_size)]
+    # chunks = [matches_list[i:i + chunk_size] for i in range(0, len(matches_list), chunk_size)]
+    
+    # OPTIMIZATION: Pass indices instead of data to avoid pickling overhead
+    indices = list(range(len(matches_list)))
+    chunks = [indices[i:i + chunk_size] for i in range(0, len(indices), chunk_size)]
     
     num_threads = int(os.environ.get('POSE_ESTIMATION_THREADS', 64))
     print(f"Processing matches with {num_threads} processes (multiprocessing)...")
@@ -208,7 +216,9 @@ def ReadColmapDatabase(path):
 
     # Set global variable for workers
     global _global_images_dict
+    global _global_matches_list
     _global_images_dict = images_dict
+    _global_matches_list = matches_list
 
     try:
         # Use fork context if available (default on Linux)
@@ -226,6 +236,7 @@ def ReadColmapDatabase(path):
     finally:
         # Clear global variable to free memory
         _global_images_dict = None
+        _global_matches_list = None
 
     view_graph.image_pairs = {pair_key: image_pair for pair_key, image_pair in image_pairs.items() if image_pair.is_valid}
     print(f'Pairs read done. {invalid_count} / {len(image_pairs)+invalid_count} are invalid')

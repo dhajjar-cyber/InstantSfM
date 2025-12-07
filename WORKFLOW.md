@@ -15,7 +15,12 @@ This document outlines the high-level pipeline of InstantSFM. It follows a "Glob
         *   **Rig Identification:** Parses filenames (e.g., regex `f(\d+)`) to group images by timestamp. Assigns "partner" IDs to images in the same rig frame.
     *   **View Graph Construction:** 
         *   Creates a graph where nodes are images and edges are matches.
-        *   **Filtering:** Applies strict thresholds (min inliers, inlier ratio) to discard weak connections.
+        *   **Initial Filtering (Data Loading):**
+            *   **Validity Check:** Discards pairs with missing or corrupt match data.
+            *   **Index Validation:** Ensures feature indices are within valid bounds for the image keypoints.
+            *   **Configuration Filtering:** Discards pairs flagged by COLMAP as `UNDEFINED`, `DEGENERATE`, or `MULTIPLE`.
+            *   *Note:* `WATERMARK` pairs are explicitly **kept** because small-baseline pairs are often misclassified as watermarks in this dataset.
+        *   **Geometric Filtering:** Applies strict thresholds (min inliers, inlier ratio) to discard weak connections.
         *   **Connectivity Check:** Keeps only the "Largest Connected Component" to ensure the graph is not fragmented.
 *   **Output:** A `ViewGraph` containing thousands of potential pairwise relationships.
 *   **Code Reference:**
