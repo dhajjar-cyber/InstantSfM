@@ -186,4 +186,4 @@ debug_dir/*
 debug_output/*
 test
 tmp/*
-demo_tmp/
+demo_tmp/install/
